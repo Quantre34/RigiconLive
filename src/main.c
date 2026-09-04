@@ -1145,7 +1145,21 @@ static void handle_command(const char *cmd) {
         render_system(line);
     } else if (strncmp(cmd, "/accept", 7) == 0 && (cmd[7] == 0 || cmd[7] == ' ')) {
         char name[RGCN_FILE_MAX_NAME];
-        parse_token(cmd + 7, name, sizeof name);
+        /* Everything after "/accept " is the filename (spaces + unicode OK).
+         * Strip optional surrounding "quotes" for user convenience. */
+        const char *arg = cmd + 7;
+        while (*arg == ' ') arg++;
+        size_t alen = strlen(arg);
+        if (alen >= 2 && arg[0] == '"' && arg[alen - 1] == '"') {
+            if (alen - 2 >= sizeof name) alen = sizeof name + 1;
+            memcpy(name, arg + 1, alen - 2);
+            name[alen - 2] = 0;
+        } else {
+            strncpy(name, arg, sizeof name - 1);
+            name[sizeof name - 1] = 0;
+            size_t n = strlen(name);
+            while (n > 0 && (name[n - 1] == ' ' || name[n - 1] == '\t')) name[--n] = 0;
+        }
         if (!name[0]) { render_system("Kullanım: /accept <dosya-adı>"); return; }
         int idx = -1;
         for (int i = 0; i < g_offer_count; i++) {
@@ -1205,7 +1219,19 @@ static void handle_command(const char *cmd) {
         render_system(line);
     } else if (strncmp(cmd, "/reject", 7) == 0 && (cmd[7] == 0 || cmd[7] == ' ')) {
         char name[RGCN_FILE_MAX_NAME];
-        parse_token(cmd + 7, name, sizeof name);
+        const char *arg = cmd + 7;
+        while (*arg == ' ') arg++;
+        size_t alen = strlen(arg);
+        if (alen >= 2 && arg[0] == '"' && arg[alen - 1] == '"') {
+            if (alen - 2 >= sizeof name) alen = sizeof name + 1;
+            memcpy(name, arg + 1, alen - 2);
+            name[alen - 2] = 0;
+        } else {
+            strncpy(name, arg, sizeof name - 1);
+            name[sizeof name - 1] = 0;
+            size_t n = strlen(name);
+            while (n > 0 && (name[n - 1] == ' ' || name[n - 1] == '\t')) name[--n] = 0;
+        }
         if (!name[0]) { render_system("Kullanım: /reject <dosya-adı>"); return; }
         int idx = -1;
         for (int i = 0; i < g_offer_count; i++) {
