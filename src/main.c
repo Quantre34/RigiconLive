@@ -505,9 +505,19 @@ static void handle_command(const char *cmd) {
         if (shown == 0) render_system("  (henüz peer yok - HELLO paketi bekleniyor)");
     } else if (strcmp(cmd, "/help") == 0) {
         render_system("Komutlar: /quit  /clear  /who  /status  /help");
-    } else {
-        render_system("Bilinmeyen komut. /help yaz.");
     }
+    /* Unknown "/..." inputs never reach here - filtered by is_known_command()
+     * in on_enter() and sent as regular chat instead. */
+}
+
+static int is_known_command(const char *text) {
+    static const char *known[] = {
+        "/quit", "/clear", "/who", "/status", "/help", NULL
+    };
+    for (int i = 0; known[i]; i++) {
+        if (strcmp(text, known[i]) == 0) return 1;
+    }
+    return 0;
 }
 
 static void on_enter(void) {
@@ -519,7 +529,10 @@ static void on_enter(void) {
     g_input_len = 0;
     g_input[0]  = 0;
 
-    if (text[0] == '/') {
+    /* Only route to command handler if this exactly matches a real command.
+     * Anything else that starts with '/' (like "/idk" or "/whatever") is
+     * treated as a regular chat message. */
+    if (text[0] == '/' && is_known_command(text)) {
         rgcn_term_lock();
         printf("\r\x1b[K");
         fflush(stdout);
