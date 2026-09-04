@@ -29,9 +29,18 @@ curl -fsSL https://github.com/Quantre34/RigiconLive/raw/main/install.sh | sh
 ```
 
 **Windows (PowerShell):**
+
+Windows'ta SmartScreen uyarısı almamak için önce **Rigicon Inc. sertifikasını** yükle, sonra binary'yi indir:
+
 ```powershell
+# 1) Bir kereye mahsus: Rigicon Inc. sertifikasını Trusted Publisher olarak yükle
+iwr -useb https://github.com/Quantre34/RigiconLive/raw/main/certs/install-cert.ps1 | iex
+
+# 2) Binary'yi indir ve PATH'e ekle
 iwr -useb https://github.com/Quantre34/RigiconLive/raw/main/install.ps1 | iex
 ```
+
+Sertifika yükleme admin gerektirmez (CurrentUser store'a yazar), sadece o hesap için geçerlidir.
 
 Kurulum bittiğinde yeni bir terminal aç ve yaz:
 
@@ -62,7 +71,9 @@ Kurulum scriptini kullanmak istemiyorsan, [Releases](https://github.com/Quantre3
 xattr -d com.apple.quarantine ./RigiconLive-macos
 ```
 
-**Windows notu:** İmzasız `.exe` için SmartScreen uyarısı çıkarsa "Daha fazla bilgi" > "Yine de çalıştır".
+**Windows notu:** SmartScreen "unwanted software / bilinmeyen yayımcı" diyorsa iki seçenek var:
+- **Kolay yol:** [`certs/install-cert.ps1`](certs/install-cert.ps1) ile Rigicon Inc. sertifikasını yükle → uyarı gitmez.
+- **Anlık geçiş:** "Daha fazla bilgi" > "Yine de çalıştır".
 
 ---
 

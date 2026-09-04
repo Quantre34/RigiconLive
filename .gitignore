@@ -4,6 +4,12 @@ build/*.obj
 build/*.res
 build/certs/
 
+# Private key material - NEVER commit
+certs/*.key
+certs/*.pfx
+certs/*.p12
+certs/cert.cnf
+
 # Compiled binaries (distributed via GitHub Releases, not committed)
 dist/macos/RigiconLive
 dist/macos/RigiconLive-universal

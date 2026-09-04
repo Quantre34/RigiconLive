@@ -79,21 +79,27 @@ jobs:
           build\resource.res
           /link ws2_32.lib bcrypt.lib
       - name: Sign executable (if PFX secret present)
-        if: env.WIN_PFX_BASE64 != ''
         env:
           WIN_PFX_BASE64: ${{ secrets.WIN_PFX_BASE64 }}
           WIN_PFX_PASSWORD: ${{ secrets.WIN_PFX_PASSWORD }}
         shell: powershell
         run: |
+          if (-not $env:WIN_PFX_BASE64) {
+            Write-Host "WIN_PFX_BASE64 secret bulunamadi - imzalama atlaniyor"
+            exit 0
+          }
           [IO.File]::WriteAllBytes("cert.pfx", [Convert]::FromBase64String($env:WIN_PFX_BASE64))
           $signtool = (Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Recurse -Filter signtool.exe |
                        Where-Object { $_.FullName -match "\\x64\\" } |
                        Sort-Object FullName -Descending | Select-Object -First 1).FullName
+          Write-Host "signtool: $signtool"
           & $signtool sign /f cert.pfx /p $env:WIN_PFX_PASSWORD `
               /tr http://timestamp.digicert.com /td sha256 /fd sha256 `
-              /d "Rigicon Live" RigiconLive.exe
-          & $signtool verify /pa RigiconLive.exe
-          Remove-Item cert.pfx
+              /d "Rigicon Live" /du "https://github.com/Quantre34/RigiconLive" `
+              RigiconLive.exe
+          if ($LASTEXITCODE -ne 0) { throw "signtool sign basarisiz" }
+          & $signtool verify /pa /v RigiconLive.exe
+          Remove-Item cert.pfx -Force
       - uses: actions/upload-artifact@v4
         with:
           name: windows
