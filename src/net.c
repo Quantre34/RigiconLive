@@ -51,6 +51,7 @@
 #define RGCN_MCAST_ADDR "239.74.44.44"
 #define RGCN_MCAST_TTL  4
 #define RGCN_MAX_DEST   64
+#define RGCN_MAX_LOCAL  32
 
 struct rgcn_net {
     SOCKET             sock;
@@ -58,7 +59,20 @@ struct rgcn_net {
     struct sockaddr_in dests[RGCN_MAX_DEST];  /* mcast + subnet bcast + limited bcast */
     int                dest_count;
     int                iface_count;
+    uint32_t           local_ips[RGCN_MAX_LOCAL];   /* network byte order */
+    int                local_count;
 };
+
+static void remember_local(struct rgcn_net *n, uint32_t ip_be) {
+    if (n->local_count >= RGCN_MAX_LOCAL) return;
+    for (int i = 0; i < n->local_count; i++) if (n->local_ips[i] == ip_be) return;
+    n->local_ips[n->local_count++] = ip_be;
+}
+
+int rgcn_net_is_self(rgcn_net_t *n, uint32_t ip_be) {
+    for (int i = 0; i < n->local_count; i++) if (n->local_ips[i] == ip_be) return 1;
+    return 0;
+}
 
 static void add_dest(struct rgcn_net *n, uint32_t addr_be, uint16_t port_be) {
     if (n->dest_count >= RGCN_MAX_DEST) return;
@@ -117,6 +131,9 @@ static void collect_and_join(struct rgcn_net *n, uint16_t port_be, uint32_t mcas
             /* Subnet-directed broadcast for this interface */
             add_dest(n, bcast_be, port_be);
 
+            /* Remember this address as one of ours */
+            remember_local(n, ip_be);
+
             /* Join multicast on this specific interface too */
             mreq.imr_interface.s_addr = ip_be;
             setsockopt(n->sock, IPPROTO_IP, IP_ADD_MEMBERSHIP,
@@ -143,6 +160,9 @@ static void collect_and_join(struct rgcn_net *n, uint16_t port_be, uint32_t mcas
 
         /* Subnet-directed broadcast for this interface */
         add_dest(n, bcast_be, port_be);
+
+        /* Remember this address as one of ours */
+        remember_local(n, ip_be);
 
         /* Join multicast on this specific interface */
         mreq.imr_interface.s_addr = ip_be;
@@ -225,7 +245,8 @@ void rgcn_net_close(rgcn_net_t *n) {
     free(n);
 }
 
-int rgcn_net_recv(rgcn_net_t *n, uint8_t *buf, size_t buf_cap, int timeout_ms) {
+int rgcn_net_recv(rgcn_net_t *n, uint8_t *buf, size_t buf_cap, int timeout_ms,
+                  uint32_t *from_ip_be, uint16_t *from_port_be) {
     fd_set rfds;
     FD_ZERO(&rfds);
     FD_SET(n->sock, &rfds);
@@ -243,6 +264,9 @@ int rgcn_net_recv(rgcn_net_t *n, uint8_t *buf, size_t buf_cap, int timeout_ms) {
     int r = recvfrom(n->sock, (char *)buf, (int)buf_cap, 0,
                      (struct sockaddr *)&from, &flen);
     if (r < 0) return -1;
+
+    if (from_ip_be)   *from_ip_be   = from.sin_addr.s_addr;
+    if (from_port_be) *from_port_be = from.sin_port;
     return r;
 }
 
@@ -254,4 +278,16 @@ int rgcn_net_broadcast(rgcn_net_t *n, const uint8_t *pkt, size_t pkt_len) {
         if (r == (int)pkt_len) ok++;
     }
     return ok > 0 ? 0 : -1;
+}
+
+int rgcn_net_unicast(rgcn_net_t *n, uint32_t ip_be, uint16_t port_be,
+                     const uint8_t *pkt, size_t pkt_len) {
+    struct sockaddr_in dst;
+    memset(&dst, 0, sizeof dst);
+    dst.sin_family      = AF_INET;
+    dst.sin_addr.s_addr = ip_be;
+    dst.sin_port        = port_be;
+    int r = sendto(n->sock, (const char *)pkt, (int)pkt_len, 0,
+                   (struct sockaddr *)&dst, sizeof dst);
+    return r == (int)pkt_len ? 0 : -1;
 }

@@ -52,7 +52,12 @@ static uint64_t g_seen[SEEN_CAP];
 static int      g_seen_pos = 0;
 
 #define PEERS_CAP 64
-static struct { char nick[RGCN_MAX_NICK]; uint64_t last_ms; } g_peers[PEERS_CAP];
+static struct {
+    char     nick[RGCN_MAX_NICK];
+    uint64_t last_ms;
+    uint32_t ip_be;
+    uint16_t port_be;
+} g_peers[PEERS_CAP];
 static int g_peer_count = 0;
 
 /* -------------------------------------------------------------------------- */
@@ -78,20 +83,27 @@ static int already_seen(uint64_t id) {
     return 0;
 }
 
-static void peer_touch(const char *nick) {
+/* Returns 1 if this is a newly-seen peer, 0 if refresh of existing. */
+static int peer_touch(const char *nick, uint32_t ip_be, uint16_t port_be) {
     uint64_t now = rgcn_now_ms();
     for (int i = 0; i < g_peer_count; i++) {
         if (strcmp(g_peers[i].nick, nick) == 0) {
             g_peers[i].last_ms = now;
-            return;
+            if (ip_be)   g_peers[i].ip_be   = ip_be;
+            if (port_be) g_peers[i].port_be = port_be;
+            return 0;
         }
     }
     if (g_peer_count < PEERS_CAP) {
         strncpy(g_peers[g_peer_count].nick, nick, RGCN_MAX_NICK - 1);
         g_peers[g_peer_count].nick[RGCN_MAX_NICK - 1] = 0;
         g_peers[g_peer_count].last_ms = now;
+        g_peers[g_peer_count].ip_be   = ip_be;
+        g_peers[g_peer_count].port_be = port_be;
         g_peer_count++;
+        return 1;
     }
+    return 0;
 }
 
 static void peer_drop(const char *nick) {
@@ -214,7 +226,18 @@ static void send_msg(const char *kind, const char *text) {
     uint8_t pkt[RGCN_MAX_PACKET];
     size_t pkt_len = 0;
     if (rgcn_seal((const uint8_t *)plain, (size_t)n, pkt, sizeof pkt, &pkt_len) != 0) return;
+
+    /* Discovery path: multicast + subnet broadcast + limited broadcast.
+     * Unreliable on WiFi (packet loss up to 70%) but reaches new peers. */
     rgcn_net_broadcast(g_net, pkt, pkt_len);
+
+    /* Reliable path: unicast to every known peer (ACKed at WiFi layer). */
+    uint64_t now = rgcn_now_ms();
+    for (int i = 0; i < g_peer_count; i++) {
+        if (!g_peers[i].ip_be || !g_peers[i].port_be) continue;
+        if (now - g_peers[i].last_ms > 300000) continue;  /* 5 min stale cutoff */
+        rgcn_net_unicast(g_net, g_peers[i].ip_be, g_peers[i].port_be, pkt, pkt_len);
+    }
 }
 
 static char *split(char **s) {
@@ -226,7 +249,8 @@ static char *split(char **s) {
     return start;
 }
 
-static void handle_decoded(const char *raw, size_t raw_len) {
+static void handle_decoded(const char *raw, size_t raw_len,
+                           uint32_t from_ip_be, uint16_t from_port_be) {
     char buf[RGCN_MAX_TEXT + 128];
     if (raw_len >= sizeof buf) return;
     memcpy(buf, raw, raw_len);
@@ -251,18 +275,25 @@ static void handle_decoded(const char *raw, size_t raw_len) {
     for (char *c = nick; *c; c++) if ((unsigned char)*c < 0x20) *c = '?';
     if (strlen(nick) == 0 || strlen(nick) >= RGCN_MAX_NICK) return;
 
+    /* Only trust unicast addresses (never a broadcast/multicast) for peer
+     * cache. The sender's socket is bound to our channel port, so we can
+     * unicast back on the same port. */
+    if (rgcn_net_is_self(g_net, from_ip_be)) from_ip_be = 0;
+
     if (strcmp(kind, "CHAT") == 0) {
         const char *text = p ? p : "";
-        peer_touch(nick);
+        (void)peer_touch(nick, from_ip_be, from_port_be);
         render_chat(nick, text, (uint64_t)ts);
         char nbody[RGCN_MAX_TEXT + 64];
         snprintf(nbody, sizeof nbody, "%s: %s", nick, text);
         rgcn_notify(RGCN_APP_NAME, nbody);
     } else if (strcmp(kind, "JOIN") == 0) {
-        peer_touch(nick);
+        int is_new = peer_touch(nick, from_ip_be, from_port_be);
         char line[128];
         snprintf(line, sizeof line, "%s kanala katıldı", nick);
         render_system(line);
+        /* Only echo-back for genuinely new peers, so we don't ping-pong. */
+        if (is_new && from_ip_be && from_port_be) send_msg("JOIN", NULL);
     } else if (strcmp(kind, "LEAVE") == 0) {
         peer_drop(nick);
         char line[128];
@@ -280,11 +311,13 @@ static RGCN_THREAD_RET receiver_thread(void *arg) {
     uint8_t pkt[RGCN_MAX_PACKET];
     uint8_t plain[RGCN_MAX_PACKET];
     while (g_running) {
-        int r = rgcn_net_recv(g_net, pkt, sizeof pkt, 500);
+        uint32_t from_ip = 0;
+        uint16_t from_port = 0;
+        int r = rgcn_net_recv(g_net, pkt, sizeof pkt, 500, &from_ip, &from_port);
         if (r <= 0) continue;
         size_t plain_len = 0;
         if (rgcn_open(pkt, (size_t)r, plain, sizeof plain, &plain_len) != 0) continue;
-        handle_decoded((const char *)plain, plain_len);
+        handle_decoded((const char *)plain, plain_len, from_ip, from_port);
     }
 #ifdef _WIN32
     return 0;
