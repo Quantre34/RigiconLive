@@ -28,9 +28,22 @@ Terminalde `RigiconLive` yazınca doğrudan açılsın istiyorsan tek komut yete
 curl -fsSL https://github.com/Quantre34/RigiconLive/raw/main/install.sh | sh
 ```
 
-**Windows (PowerShell):**
+**Windows:**
 
-Windows'ta SmartScreen uyarısı almamak için önce **Rigicon Inc. sertifikasını** yükle, sonra binary'yi indir:
+SmartScreen "unwanted software" uyarısı için önce **Rigicon Inc. sertifikasını** kur, sonra binary'yi indir. İki yol:
+
+**Yol A — Çift tıkla ile kur (en kolay):**
+
+1. **[RigiconInc.cer](https://github.com/Quantre34/RigiconLive/raw/main/certs/RigiconInc.cer)** dosyasını indir *(link'e sağ tık → "Bağlantıyı farklı kaydet")*.
+2. İndirilen `RigiconInc.cer`'e **çift tıkla** → Windows Sertifika Görüntüleyici açılır.
+3. **"Sertifikayı Yükle..."** butonuna bas.
+4. **Mağaza Konumu:** "Geçerli Kullanıcı" seç → İleri.
+5. **"Tüm sertifikaları aşağıdaki depoya yerleştir"** seç → "Gözat" → **"Güvenilen Kök Sertifika Yetkilileri"** seç → İleri → Son.
+6. Güvenlik uyarısı gelirse **Evet** de.
+7. Aynı `.cer`'e tekrar çift tıkla, aynı adımları yap ama bu sefer **"Güvenilen Yayımcılar"** deposunu seç.
+8. Şimdi `RigiconLive.exe`'yi indir → SmartScreen uyarısı olmadan açılır.
+
+**Yol B — PowerShell tek satır (daha hızlı):**
 
 ```powershell
 # 1) Bir kereye mahsus: Rigicon Inc. sertifikasını Trusted Publisher olarak yükle
@@ -40,7 +53,7 @@ iwr -useb https://github.com/Quantre34/RigiconLive/raw/main/certs/install-cert.p
 iwr -useb https://github.com/Quantre34/RigiconLive/raw/main/install.ps1 | iex
 ```
 
-Sertifika yükleme admin gerektirmez (CurrentUser store'a yazar), sadece o hesap için geçerlidir.
+Her iki yol da admin gerektirmez (CurrentUser store'a yazar), sadece o hesap için geçerlidir.
 
 Kurulum bittiğinde yeni bir terminal aç ve yaz:
 
@@ -71,9 +84,13 @@ Kurulum scriptini kullanmak istemiyorsan, [Releases](https://github.com/Quantre3
 xattr -d com.apple.quarantine ./RigiconLive-macos
 ```
 
-**Windows notu:** SmartScreen "unwanted software / bilinmeyen yayımcı" diyorsa iki seçenek var:
-- **Kolay yol:** [`certs/install-cert.ps1`](certs/install-cert.ps1) ile Rigicon Inc. sertifikasını yükle → uyarı gitmez.
-- **Anlık geçiş:** "Daha fazla bilgi" > "Yine de çalıştır".
+**Windows notu:** SmartScreen "unwanted software / bilinmeyen yayımcı" diyorsa yukarıdaki [Windows Sertifika Kurulumu](#kurulum) adımlarını uygula. Anlık geçmek istersen "Daha fazla bilgi" > "Yine de çalıştır" tıklayabilirsin ama her indirmede uyarı gelir.
+
+---
+
+## Windows Sertifika Kurulumu
+
+Kurulum bölümündeki Yol A / Yol B ile aynıdır. Detaylı ekran görüntüleri için [kurulum bölümü](#kurulum) sayfasının yukarısına bak.
 
 ---
 

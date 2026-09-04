@@ -121,12 +121,16 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
+      - uses: actions/checkout@v4
+        with:
+          path: repo
       - name: Stage release files
         run: |
           mkdir -p release
           mv artifacts/macos/RigiconLive-macos       release/RigiconLive-macos
           mv artifacts/linux/RigiconLive-linux       release/RigiconLive-linux
           mv artifacts/windows/RigiconLive.exe       release/RigiconLive.exe
+          cp repo/certs/RigiconInc.cer               release/RigiconInc.cer
           chmod +x release/RigiconLive-macos release/RigiconLive-linux
           ls -lh release/
       - name: Determine tag
@@ -152,5 +156,6 @@ jobs:
             | **macOS** (Intel + Apple Silicon) | `RigiconLive-macos` | `chmod +x RigiconLive-macos && ./RigiconLive-macos` |
             | **Linux** (x86_64) | `RigiconLive-linux` | `chmod +x RigiconLive-linux && ./RigiconLive-linux` |
             | **Windows** (x64) | `RigiconLive.exe` | Çift tıkla veya CMD/PowerShell'de çalıştır |
+            | **Windows sertifikası** | `RigiconInc.cer` | SmartScreen uyarısını kaldırmak için — kurulum için [README](https://github.com/Quantre34/RigiconLive#windows-sertifika-kurulumu) |
 
             Ayrıntılı kullanım kılavuzu için [README](https://github.com/Quantre34/RigiconLive#readme) sayfasına bak.
