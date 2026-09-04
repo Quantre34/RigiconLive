@@ -13,6 +13,7 @@
 #include "net.h"
 #include "term.h"
 #include "notify.h"
+#include "file.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -20,6 +21,7 @@
 #include <ctype.h>
 #include <time.h>
 #include <signal.h>
+#include <sys/stat.h>
 
 #ifdef _WIN32
   #include <windows.h>
@@ -46,6 +48,84 @@ static rgcn_net_t *g_net = NULL;
 static char       g_input[RGCN_MAX_TEXT];
 static size_t     g_input_len = 0;
 static int        g_notify_on = 0;
+static uint32_t   g_timer_ms  = 0;   /* /timer session TTL; 0 = off */
+
+/* Rows advanced since startup - used to locate a burn-scheduled line for
+ * later overwrite via ANSI cursor arithmetic. */
+static uint64_t   g_lines_printed = 0;
+
+/* Pending BURN expirations - each records where on screen the line is + when
+ * to overwrite it with "(silindi)". */
+#define BURN_SLOTS  128
+static struct {
+    uint64_t line_no;      /* g_lines_printed value at render time */
+    uint64_t expire_ms;    /* absolute rgcn_now_ms() when to fire */
+    char     nick[RGCN_MAX_NICK];
+    uint64_t ts_ms;        /* original message ts, for pretty rewrite */
+} g_burns[BURN_SLOTS];
+static int g_burn_count = 0;
+
+/* Pending inbound file offers (someone offered a file, we haven't decided). */
+#define OFFER_SLOTS 16
+static struct {
+    uint64_t offer_id;
+    char     sender_nick[RGCN_MAX_NICK];
+    uint32_t sender_ip_be;
+    uint16_t sender_port_be;   /* TCP port to fetch from */
+    char     filename[RGCN_FILE_MAX_NAME];
+    uint64_t size;
+    uint8_t  sha256[32];
+    uint64_t received_at_ms;
+} g_offers[OFFER_SLOTS];
+static int g_offer_count = 0;
+
+/* Outbound offers we've broadcast, waiting for accept. */
+#define SENT_OFFER_SLOTS 4
+static struct {
+    uint64_t offer_id;
+    int      listen_socket;
+    uint16_t listen_port;
+    char     path[RGCN_FILE_MAX_PATH];
+    uint64_t size;
+    char     filename[RGCN_FILE_MAX_NAME];
+} g_sent_offers[SENT_OFFER_SLOTS];
+static int g_sent_offer_count = 0;
+
+static uint64_t hex_to_u64(const char *s) {
+    uint64_t v = 0;
+    while (*s) {
+        v <<= 4;
+        char c = *s++;
+        if      (c >= '0' && c <= '9') v |= c - '0';
+        else if (c >= 'a' && c <= 'f') v |= c - 'a' + 10;
+        else if (c >= 'A' && c <= 'F') v |= c - 'A' + 10;
+    }
+    return v;
+}
+
+static void hex_encode(const uint8_t *b, size_t n, char *out) {
+    static const char *hx = "0123456789ABCDEF";
+    for (size_t i = 0; i < n; i++) {
+        out[i*2]   = hx[b[i] >> 4];
+        out[i*2+1] = hx[b[i] & 0x0f];
+    }
+    out[n * 2] = 0;
+}
+
+static int hex_decode(const char *hex, uint8_t *out, size_t n) {
+    for (size_t i = 0; i < n; i++) {
+        char h = hex[i*2], l = hex[i*2+1];
+        int hv = (h >= '0' && h <= '9') ? h - '0'
+               : (h >= 'a' && h <= 'f') ? h - 'a' + 10
+               : (h >= 'A' && h <= 'F') ? h - 'A' + 10 : -1;
+        int lv = (l >= '0' && l <= '9') ? l - '0'
+               : (l >= 'a' && l <= 'f') ? l - 'a' + 10
+               : (l >= 'A' && l <= 'F') ? l - 'A' + 10 : -1;
+        if (hv < 0 || lv < 0) return -1;
+        out[i] = (uint8_t)((hv << 4) | lv);
+    }
+    return 0;
+}
 
 #define SEEN_CAP 512
 static uint64_t g_seen[SEEN_CAP];
@@ -188,9 +268,13 @@ static void time_hms(char *out, size_t cap, uint64_t ms) {
 
 static void print_prompt_unlocked(void) {
     const char *c = rgcn_color_for(g_nick);
+    const char *gray = rgcn_color_gray();
     const char *r = rgcn_color_reset();
-    printf("\r\x1b[K%s%s%s ▸ %s", c, g_nick, rgcn_color_gray(), r);
-    /* Reprint any input the user was typing. */
+    printf("\r\x1b[K");
+    if (g_timer_ms > 0) {
+        printf("%s[%us]%s ", gray, g_timer_ms / 1000, r);
+    }
+    printf("%s%s%s ▸ %s", c, g_nick, gray, r);
     if (g_input_len > 0) fwrite(g_input, 1, g_input_len, stdout);
     fflush(stdout);
 }
@@ -198,6 +282,7 @@ static void print_prompt_unlocked(void) {
 static void write_line(const char *line) {
     rgcn_term_lock();
     printf("\r\x1b[K%s\n", line);
+    g_lines_printed++;
     print_prompt_unlocked();
     rgcn_term_unlock();
 }
@@ -210,6 +295,76 @@ static void render_chat(const char *nick, const char *text, uint64_t ts) {
              rgcn_color_for(nick), nick, rgcn_color_reset(),
              text);
     write_line(line);
+}
+
+/* Render a self-destructing message. Returns the line_no it landed on so the
+ * caller can schedule an expiration. */
+static uint64_t render_burn(const char *nick, const char *text, uint64_t ts,
+                            uint32_t ttl_ms) {
+    char tbuf[16]; time_hms(tbuf, sizeof tbuf, ts);
+    char line[RGCN_MAX_TEXT + 160];
+    snprintf(line, sizeof line,
+             "%s[%s]%s %s%s%s: %s   %s[%us]%s",
+             rgcn_color_gray(), tbuf, rgcn_color_reset(),
+             rgcn_color_for(nick), nick, rgcn_color_reset(),
+             text,
+             rgcn_color_gray(), ttl_ms / 1000, rgcn_color_reset());
+    write_line(line);
+    return g_lines_printed;   /* value AFTER write_line's increment */
+}
+
+static void schedule_burn(uint64_t line_no, uint64_t expire_ms,
+                          const char *nick, uint64_t ts_ms) {
+    if (g_burn_count >= BURN_SLOTS) return;
+    g_burns[g_burn_count].line_no   = line_no;
+    g_burns[g_burn_count].expire_ms = expire_ms;
+    strncpy(g_burns[g_burn_count].nick, nick, RGCN_MAX_NICK - 1);
+    g_burns[g_burn_count].nick[RGCN_MAX_NICK - 1] = 0;
+    g_burns[g_burn_count].ts_ms     = ts_ms;
+    g_burn_count++;
+}
+
+/* Called periodically from the receiver thread. Overwrites any expired
+ * burn-scheduled line with "(silindi)". Uses save/restore-cursor ANSI so
+ * the user's active prompt+input is not disturbed. */
+static void expire_burns(void) {
+    uint64_t now = rgcn_now_ms();
+    int wrote = 0;
+    rgcn_term_lock();
+    for (int i = 0; i < g_burn_count; ) {
+        if (now >= g_burns[i].expire_ms) {
+            /* Cursor is currently on the prompt line, one row below the last
+             * rendered message line. Distance up = (lines printed since burn) + 1. */
+            uint64_t offset = (g_lines_printed - g_burns[i].line_no) + 1;
+            if (offset > 0 && offset < 200) {
+                char tbuf[16]; time_hms(tbuf, sizeof tbuf, g_burns[i].ts_ms);
+                printf("\x1b[s");                    /* save cursor */
+                printf("\x1b[%uA", (unsigned)offset);/* move up */
+                printf("\r\x1b[K");                   /* clear line */
+                printf("%s[%s]%s %s%s%s: %s(silindi)%s",
+                       rgcn_color_gray(), tbuf, rgcn_color_reset(),
+                       rgcn_color_for(g_burns[i].nick),
+                       g_burns[i].nick, rgcn_color_reset(),
+                       rgcn_color_gray(), rgcn_color_reset());
+                printf("\x1b[u");                    /* restore cursor */
+                wrote = 1;
+            }
+            g_burns[i] = g_burns[--g_burn_count];
+        } else {
+            i++;
+        }
+    }
+    if (wrote) fflush(stdout);
+    rgcn_term_unlock();
+}
+
+/* Clear all burn tracking - called on /clear where the screen (and thus the
+ * ability to visually silme) is wiped anyway. */
+static void reset_burns(void) {
+    rgcn_term_lock();
+    g_burn_count = 0;
+    g_lines_printed = 0;
+    rgcn_term_unlock();
 }
 
 static void render_system(const char *text) {
@@ -235,7 +390,7 @@ static void render_banner(int notify_on) {
     printf("  %sŞifreleme:%s ChaCha20-Poly1305 (AEAD, RFC 8439)\n", gray, rst);
     printf("  %sİz       :%s Sıfır. Kapanınca her şey gider.\n", gray, rst);
     printf("%s%s%s\n", gray, "═══════════════════════════════════════════════════════════", rst);
-    printf("  %sKomutlar: /quit  /clear  /who  /status  /help    Enter ile gönder%s\n", gray, rst);
+    printf("  %sKomutlar: /quit /clear /who /status /timer /send /accept /reject /help%s\n", gray, rst);
     printf("%s%s%s\n\n", gray, "───────────────────────────────────────────────────────────", rst);
     fflush(stdout);
 }
@@ -248,14 +403,25 @@ static void render_banner(int notify_on) {
 /* All inside a ChaCha20-Poly1305 sealed envelope on the wire.                 */
 /* -------------------------------------------------------------------------- */
 
-static void send_msg(const char *kind, const char *text) {
+/* Sends a raw kind. If ttl_ms > 0 and kind is CHAT, transparently upgrades to
+ * BURN wire type with the ttl embedded. */
+static void send_kind_ttl(const char *kind, const char *text, uint32_t ttl_ms) {
     uint64_t id = 0;
     rgcn_random_bytes((uint8_t *)&id, sizeof id);
     uint64_t ts = rgcn_now_ms();
 
     char plain[RGCN_MAX_TEXT + 128];
     int n;
-    if (text) {
+    int is_burn = (ttl_ms > 0 && strcmp(kind, "CHAT") == 0);
+    if (is_burn) {
+        n = snprintf(plain, sizeof plain,
+                     "BURN|%016llX|%016llX|%llu|%s|%u|%s",
+                     (unsigned long long)g_station,
+                     (unsigned long long)id,
+                     (unsigned long long)ts,
+                     g_nick, ttl_ms,
+                     text ? text : "");
+    } else if (text) {
         n = snprintf(plain, sizeof plain,
                      "%s|%016llX|%016llX|%llu|%s|%s",
                      kind,
@@ -303,6 +469,35 @@ static void send_msg(const char *kind, const char *text) {
     for (int i = 0; i < snap_n; i++) {
         rgcn_net_unicast(g_net, snap[i].ip, snap[i].port, pkt, pkt_len);
     }
+}
+
+/* Convenience wrapper - existing call sites don't use timer. */
+static void send_msg(const char *kind, const char *text) {
+    send_kind_ttl(kind, text, 0);
+}
+
+/* Broadcast a raw pre-formed plaintext message (for FILE_* messages that don't
+ * fit the "kind|station|id|ts|nick|text" auto-formatting). */
+static void send_raw_plaintext(const char *plain, size_t n) {
+    uint8_t pkt[RGCN_MAX_PACKET];
+    size_t pkt_len = 0;
+    if (rgcn_seal((const uint8_t *)plain, n, pkt, sizeof pkt, &pkt_len) != 0) return;
+    rgcn_net_broadcast(g_net, pkt, pkt_len);
+
+    struct { uint32_t ip; uint16_t port; } snap[PEERS_CAP];
+    int snap_n = 0;
+    uint64_t now = rgcn_now_ms();
+    PEER_LOCK();
+    for (int i = 0; i < g_peer_count; i++) {
+        if (!g_peers[i].ip_be || !g_peers[i].port_be) continue;
+        if (now - g_peers[i].last_ms > PEER_STALE_MS) continue;
+        snap[snap_n].ip   = g_peers[i].ip_be;
+        snap[snap_n].port = g_peers[i].port_be;
+        snap_n++;
+    }
+    PEER_UNLOCK();
+    for (int i = 0; i < snap_n; i++)
+        rgcn_net_unicast(g_net, snap[i].ip, snap[i].port, pkt, pkt_len);
 }
 
 static char *split(char **s) {
@@ -374,6 +569,102 @@ static void handle_decoded(const char *raw, size_t raw_len,
         }
         /* Echo-back so the new peer learns our IP too. */
         if (is_new && from_ip_be && from_port_be) send_msg("JOIN", NULL);
+    } else if (strcmp(kind, "FILE_OFFER") == 0) {
+        /* FILE_OFFER|station|id|ts|sender_nick|offer_id_hex|filename|size|sha256_hex|tcp_port|target_nick */
+        char *offer_id_s = split(&p);
+        char *filename   = split(&p);
+        char *size_s     = split(&p);
+        char *sha_hex    = split(&p);
+        char *port_s     = split(&p);
+        char *target     = p;   /* remainder, possibly empty */
+        if (!offer_id_s || !filename || !size_s || !sha_hex || !port_s) return;
+        if (target && *target && strcmp(target, g_nick) != 0) return;
+
+        char clean_name[RGCN_FILE_MAX_NAME];
+        if (rgcn_file_sanitize_name(filename, clean_name, sizeof clean_name) != 0) return;
+
+        uint64_t off_id = hex_to_u64(offer_id_s);
+        uint64_t sz     = strtoull(size_s, NULL, 10);
+        uint16_t tcp_p  = (uint16_t)atoi(port_s);
+        if (sz > RGCN_FILE_MAX_SIZE) return;
+        if (!tcp_p) return;
+        uint8_t sha[32];
+        if (hex_decode(sha_hex, sha, 32) != 0) return;
+
+        /* Cache the offer */
+        if (g_offer_count < OFFER_SLOTS) {
+            g_offers[g_offer_count].offer_id       = off_id;
+            strncpy(g_offers[g_offer_count].sender_nick, nick, RGCN_MAX_NICK - 1);
+            g_offers[g_offer_count].sender_nick[RGCN_MAX_NICK - 1] = 0;
+            g_offers[g_offer_count].sender_ip_be   = from_ip_be;
+            /* Sender's TCP port is different from our UDP channel port -
+             * they told us in the packet. Store in network byte order. */
+            g_offers[g_offer_count].sender_port_be = htons(tcp_p);
+            strncpy(g_offers[g_offer_count].filename, clean_name, RGCN_FILE_MAX_NAME - 1);
+            g_offers[g_offer_count].filename[RGCN_FILE_MAX_NAME - 1] = 0;
+            g_offers[g_offer_count].size           = sz;
+            memcpy(g_offers[g_offer_count].sha256, sha, 32);
+            g_offers[g_offer_count].received_at_ms = rgcn_now_ms();
+            g_offer_count++;
+        }
+
+        char sbuf[32]; rgcn_file_size_str(sz, sbuf, sizeof sbuf);
+        char line[256];
+        int risky = rgcn_file_ext_is_risky(clean_name);
+        snprintf(line, sizeof line,
+                 "%s%s%s dosya paylaşıyor: %s (%s)%s",
+                 rgcn_color_for(nick), nick, rgcn_color_reset(),
+                 clean_name, sbuf,
+                 risky ? "  \x1b[33m[UYARI: çalıştırılabilir uzantı]\x1b[0m" : "");
+        render_system(line);
+        snprintf(line, sizeof line,
+                 "  Kabul: /accept %s   |   Reddet: /reject %s",
+                 clean_name, clean_name);
+        render_system(line);
+    } else if (strcmp(kind, "FILE_ACCEPT") == 0) {
+        /* FILE_ACCEPT|station|id|ts|accepter_nick|offer_id_hex */
+        char *offer_id_s = p ? p : NULL;
+        if (!offer_id_s) return;
+        uint64_t off_id = hex_to_u64(offer_id_s);
+        /* Is this OUR outbound offer? */
+        int idx = -1;
+        for (int i = 0; i < g_sent_offer_count; i++) {
+            if (g_sent_offers[i].offer_id == off_id) { idx = i; break; }
+        }
+        if (idx < 0) return;
+        char line[192];
+        snprintf(line, sizeof line, "%s%s%s kabul etti: %s - gönderiliyor...",
+                 rgcn_color_for(nick), nick, rgcn_color_reset(),
+                 g_sent_offers[idx].filename);
+        render_system(line);
+        /* Sender's serve thread will accept and stream. See spawn_serve_thread. */
+    } else if (strcmp(kind, "FILE_REJECT") == 0) {
+        char *offer_id_s = p ? p : NULL;
+        if (!offer_id_s) return;
+        char line[192];
+        snprintf(line, sizeof line, "%s%s%s dosya isteğini reddetti",
+                 rgcn_color_for(nick), nick, rgcn_color_reset());
+        render_system(line);
+    } else if (strcmp(kind, "BURN") == 0) {
+        /* BURN|station|id|ts|nick|expire_ms|text - self-destructing CHAT. */
+        char *ttl_s = p ? split(&p) : NULL;
+        char *text  = p ? p : (char *)"";
+        if (!ttl_s) return;
+        for (char *c = text; *c; c++) {
+            unsigned char b = (unsigned char)*c;
+            if (b < 0x20 && b != '\t') *c = '?';
+            if (b == 0x7f) *c = '?';
+        }
+        unsigned long ttl_ms = strtoul(ttl_s, NULL, 10);
+        if (ttl_ms < 1000)      ttl_ms = 1000;      /* min 1s */
+        if (ttl_ms > 3600000UL) ttl_ms = 3600000UL; /* max 1h */
+        int is_new = peer_touch(nick, (uint64_t)st, from_ip_be, from_port_be);
+        uint64_t line_no = render_burn(nick, text, (uint64_t)ts, (uint32_t)ttl_ms);
+        schedule_burn(line_no, rgcn_now_ms() + ttl_ms, nick, (uint64_t)ts);
+        char nbody[RGCN_MAX_TEXT + 64];
+        snprintf(nbody, sizeof nbody, "%s: %s [%us]", nick, text, (unsigned)(ttl_ms/1000));
+        rgcn_notify(RGCN_APP_NAME, nbody);
+        if (is_new && from_ip_be && from_port_be) send_msg("JOIN", NULL);
     } else if (strcmp(kind, "LEAVE") == 0) {
         peer_drop(nick);
         char line[128];
@@ -407,6 +698,9 @@ static RGCN_THREAD_RET receiver_thread(void *arg) {
             if (rgcn_open(pkt, (size_t)r, plain, sizeof plain, &plain_len) == 0)
                 handle_decoded((const char *)plain, plain_len, from_ip, from_port);
         }
+
+        /* Every wake-up: check burn expirations (fast, cheap). */
+        expire_burns();
 
         /* Periodic maintenance: expire stale peers + re-announce presence. */
         uint64_t now = rgcn_now_ms();
@@ -451,15 +745,138 @@ static void input_backspace(void) {
     g_input[g_input_len] = 0;
 }
 
+/* -------------------------------------------------------------------------- */
+/* File transfer glue - threads used by /send and /accept below                */
+/* -------------------------------------------------------------------------- */
+
+struct serve_args {
+    int      listen_sock;
+    uint64_t offer_id;
+    uint64_t size;
+    char     path[RGCN_FILE_MAX_PATH];
+    char     filename[RGCN_FILE_MAX_NAME];
+};
+
+static void serve_progress(uint64_t sent, uint64_t total, void *ud) {
+    struct serve_args *a = (struct serve_args *)ud;
+    static uint64_t last_report = 0;
+    uint64_t now = rgcn_now_ms();
+    if (now - last_report < 1000 && sent < total) return;
+    last_report = now;
+    int pct = (int)((sent * 100) / (total ? total : 1));
+    char sbuf[32]; rgcn_file_size_str(sent, sbuf, sizeof sbuf);
+    char line[192];
+    snprintf(line, sizeof line, "%s gönderiliyor: %s (%d%%)",
+             a->filename, sbuf, pct);
+    render_system(line);
+}
+
+static RGCN_THREAD_RET file_serve_thread(void *ud) {
+    struct serve_args *a = (struct serve_args *)ud;
+    int rc = rgcn_file_serve_once(a->listen_sock, a->path, a->offer_id,
+                                  a->size, 120, serve_progress, a);
+    char line[192];
+    if (rc == 0) snprintf(line, sizeof line, "%s gönderildi.", a->filename);
+    else         snprintf(line, sizeof line, "%s gönderilemedi.", a->filename);
+    render_system(line);
+
+    PEER_LOCK();
+    for (int i = 0; i < g_sent_offer_count; i++) {
+        if (g_sent_offers[i].offer_id == a->offer_id) {
+            g_sent_offers[i] = g_sent_offers[--g_sent_offer_count];
+            break;
+        }
+    }
+    PEER_UNLOCK();
+    free(a);
+#ifdef _WIN32
+    return 0;
+#else
+    return NULL;
+#endif
+}
+
+struct download_args {
+    uint32_t sender_ip_be;
+    uint16_t sender_port_be;
+    uint64_t offer_id;
+    uint64_t size;
+    uint8_t  sha256[32];
+    char     dest_path[RGCN_FILE_MAX_PATH];
+    char     filename[RGCN_FILE_MAX_NAME];
+    char     sender_nick[RGCN_MAX_NICK];
+};
+
+static void download_progress(uint64_t got, uint64_t total, void *ud) {
+    struct download_args *a = (struct download_args *)ud;
+    static uint64_t last_report = 0;
+    uint64_t now = rgcn_now_ms();
+    if (now - last_report < 1000 && got < total) return;
+    last_report = now;
+    int pct = (int)((got * 100) / (total ? total : 1));
+    char sbuf[32]; rgcn_file_size_str(got, sbuf, sizeof sbuf);
+    char line[192];
+    snprintf(line, sizeof line, "%s indiriliyor: %s (%d%%)",
+             a->filename, sbuf, pct);
+    render_system(line);
+}
+
+static RGCN_THREAD_RET file_download_thread(void *ud) {
+    struct download_args *a = (struct download_args *)ud;
+    int rc = rgcn_file_download(a->sender_ip_be, a->sender_port_be,
+                                a->offer_id, a->size, a->sha256,
+                                a->dest_path, download_progress, a);
+    char line[512];
+    if (rc == 0)      snprintf(line, sizeof line, "%s alındı → %s", a->filename, a->dest_path);
+    else if (rc == -2) snprintf(line, sizeof line, "%s: SHA-256 uyuşmadı, reddedildi", a->filename);
+    else              snprintf(line, sizeof line, "%s indirilemedi", a->filename);
+    render_system(line);
+    free(a);
+#ifdef _WIN32
+    return 0;
+#else
+    return NULL;
+#endif
+}
+
 static void handle_command(const char *cmd) {
     if (strcmp(cmd, "/quit") == 0) {
         g_running = 0;
     } else if (strcmp(cmd, "/clear") == 0) {
+        reset_burns();
         rgcn_term_clear_screen();
         render_banner(g_notify_on);
         rgcn_term_lock();
         print_prompt_unlocked();
         rgcn_term_unlock();
+    } else if (strncmp(cmd, "/timer", 6) == 0) {
+        const char *arg = cmd + 6;
+        while (*arg == ' ') arg++;
+        if (*arg == 0) {
+            if (g_timer_ms == 0) render_system("Timer: kapalı.");
+            else {
+                char buf[64];
+                snprintf(buf, sizeof buf, "Timer: %u saniye (aktif).",
+                         g_timer_ms / 1000);
+                render_system(buf);
+            }
+        } else if (strcmp(arg, "off") == 0 || strcmp(arg, "0") == 0) {
+            g_timer_ms = 0;
+            render_system("Timer kapatıldı.");
+        } else {
+            char *end = NULL;
+            long v = strtol(arg, &end, 10);
+            if (end == arg || v < 1 || v > 3600) {
+                render_system("Kullanım: /timer <1-3600 saniye> | /timer off");
+            } else {
+                g_timer_ms = (uint32_t)(v * 1000);
+                char buf[80];
+                snprintf(buf, sizeof buf,
+                         "Timer: %ld saniye. Sonraki mesajlar %ld saniyede silinecek.",
+                         v, v);
+                render_system(buf);
+            }
+        }
     } else if (strcmp(cmd, "/who") == 0) {
         uint64_t now = rgcn_now_ms();
         char line[512]; line[0] = 0;
@@ -511,19 +928,214 @@ static void handle_command(const char *cmd) {
         }
         PEER_UNLOCK();
         if (shown == 0) render_system("  (henüz peer yok - HELLO paketi bekleniyor)");
+    } else if (strncmp(cmd, "/send", 5) == 0 && (cmd[5] == 0 || cmd[5] == ' ')) {
+        const char *arg = cmd + 5;
+        while (*arg == ' ') arg++;
+        if (!*arg) { render_system("Kullanım: /send <dosya-yolu>  |  /send @rumuz <dosya-yolu>"); return; }
+        /* Optional target: /send @nick /path */
+        char target[RGCN_MAX_NICK] = {0};
+        if (arg[0] == '@') {
+            arg++;
+            size_t k = 0;
+            while (*arg && *arg != ' ' && k < RGCN_MAX_NICK - 1) target[k++] = *arg++;
+            target[k] = 0;
+            while (*arg == ' ') arg++;
+        }
+        if (!*arg) { render_system("Kullanım: /send @rumuz <dosya-yolu>"); return; }
+        /* Resolve path relative to cwd */
+        struct stat st;
+        if (stat(arg, &st) != 0 || !S_ISREG(st.st_mode)) {
+            render_system("Dosya bulunamadı."); return;
+        }
+        if ((uint64_t)st.st_size > RGCN_FILE_MAX_SIZE) {
+            render_system("Dosya çok büyük (>50 MB)."); return;
+        }
+        if (g_sent_offer_count >= SENT_OFFER_SLOTS) {
+            render_system("Zaten bekleyen çok dosya var, biraz bekle."); return;
+        }
+
+        /* SHA-256 the file */
+        uint8_t sha[32];
+        if (rgcn_sha256_file(arg, sha) != 0) {
+            render_system("Dosya okunamadı."); return;
+        }
+        char sha_hex[65];
+        hex_encode(sha, 32, sha_hex);
+
+        /* Sanitize the on-wire filename (just basename, no path) */
+        char clean_name[RGCN_FILE_MAX_NAME];
+        if (rgcn_file_sanitize_name(arg, clean_name, sizeof clean_name) != 0) {
+            render_system("Dosya adı geçersiz."); return;
+        }
+
+        /* Open TCP listener */
+        int lsock;
+        uint16_t lport;
+        if (rgcn_file_open_listener(&lsock, &lport) != 0) {
+            render_system("TCP portu açılamadı."); return;
+        }
+
+        /* Register outbound offer */
+        uint64_t off_id = 0;
+        rgcn_random_bytes((uint8_t *)&off_id, sizeof off_id);
+        int idx = g_sent_offer_count++;
+        g_sent_offers[idx].offer_id     = off_id;
+        g_sent_offers[idx].listen_socket = lsock;
+        g_sent_offers[idx].listen_port  = lport;
+        strncpy(g_sent_offers[idx].path, arg, RGCN_FILE_MAX_PATH - 1);
+        g_sent_offers[idx].path[RGCN_FILE_MAX_PATH - 1] = 0;
+        g_sent_offers[idx].size         = (uint64_t)st.st_size;
+        strncpy(g_sent_offers[idx].filename, clean_name, RGCN_FILE_MAX_NAME - 1);
+        g_sent_offers[idx].filename[RGCN_FILE_MAX_NAME - 1] = 0;
+
+        /* Spawn serve thread (waits for accept, handshake, streams file) */
+        struct serve_args *sa = (struct serve_args *)calloc(1, sizeof *sa);
+        sa->listen_sock = lsock;
+        sa->offer_id    = off_id;
+        sa->size        = (uint64_t)st.st_size;
+        strncpy(sa->path, arg, RGCN_FILE_MAX_PATH - 1);
+        strncpy(sa->filename, clean_name, RGCN_FILE_MAX_NAME - 1);
+#ifdef _WIN32
+        HANDLE th = (HANDLE)_beginthreadex(NULL, 0, file_serve_thread, sa, 0, NULL);
+        if (th) CloseHandle(th);
+#else
+        pthread_t th; pthread_create(&th, NULL, file_serve_thread, sa);
+        pthread_detach(th);
+#endif
+
+        /* Broadcast FILE_OFFER */
+        uint64_t id = 0; rgcn_random_bytes((uint8_t *)&id, sizeof id);
+        uint64_t ts = rgcn_now_ms();
+        char plain[1024];
+        int n = snprintf(plain, sizeof plain,
+                         "FILE_OFFER|%016llX|%016llX|%llu|%s|%016llX|%s|%llu|%s|%u|%s",
+                         (unsigned long long)g_station,
+                         (unsigned long long)id,
+                         (unsigned long long)ts,
+                         g_nick,
+                         (unsigned long long)off_id,
+                         clean_name,
+                         (unsigned long long)st.st_size,
+                         sha_hex,
+                         lport,
+                         target);
+        if (n > 0 && n < (int)sizeof plain) send_raw_plaintext(plain, n);
+
+        char sbuf[32]; rgcn_file_size_str((uint64_t)st.st_size, sbuf, sizeof sbuf);
+        char line[192];
+        if (target[0]) snprintf(line, sizeof line, "%s (%s) → @%s teklif edildi.", clean_name, sbuf, target);
+        else           snprintf(line, sizeof line, "%s (%s) kanala teklif edildi.", clean_name, sbuf);
+        render_system(line);
+    } else if (strncmp(cmd, "/accept", 7) == 0 && (cmd[7] == 0 || cmd[7] == ' ')) {
+        const char *arg = cmd + 7;
+        while (*arg == ' ') arg++;
+        if (!*arg) { render_system("Kullanım: /accept <dosya-adı>"); return; }
+        /* Find offer by filename */
+        int idx = -1;
+        for (int i = 0; i < g_offer_count; i++) {
+            if (strcmp(g_offers[i].filename, arg) == 0) { idx = i; break; }
+        }
+        if (idx < 0) { render_system("Böyle bir teklif yok."); return; }
+
+        /* Prepare destination path */
+        char dir[RGCN_FILE_MAX_PATH];
+        if (rgcn_file_download_dir(dir, sizeof dir) != 0) {
+            render_system("~/Downloads/RigiconLive/ oluşturulamadı."); return;
+        }
+        char dest[RGCN_FILE_MAX_PATH];
+#ifdef _WIN32
+        snprintf(dest, sizeof dest, "%s\\%s", dir, g_offers[idx].filename);
+#else
+        snprintf(dest, sizeof dest, "%s/%s", dir, g_offers[idx].filename);
+#endif
+
+        struct download_args *da = (struct download_args *)calloc(1, sizeof *da);
+        da->sender_ip_be   = g_offers[idx].sender_ip_be;
+        da->sender_port_be = g_offers[idx].sender_port_be;
+        da->offer_id       = g_offers[idx].offer_id;
+        da->size           = g_offers[idx].size;
+        memcpy(da->sha256, g_offers[idx].sha256, 32);
+        strncpy(da->dest_path, dest, RGCN_FILE_MAX_PATH - 1);
+        strncpy(da->filename, g_offers[idx].filename, RGCN_FILE_MAX_NAME - 1);
+        strncpy(da->sender_nick, g_offers[idx].sender_nick, RGCN_MAX_NICK - 1);
+
+        /* Send FILE_ACCEPT to sender */
+        uint64_t id = 0; rgcn_random_bytes((uint8_t *)&id, sizeof id);
+        uint64_t ts = rgcn_now_ms();
+        char plain[256];
+        int n = snprintf(plain, sizeof plain,
+                         "FILE_ACCEPT|%016llX|%016llX|%llu|%s|%016llX",
+                         (unsigned long long)g_station,
+                         (unsigned long long)id,
+                         (unsigned long long)ts,
+                         g_nick,
+                         (unsigned long long)g_offers[idx].offer_id);
+        if (n > 0) send_raw_plaintext(plain, n);
+
+        /* Remove offer from list */
+        g_offers[idx] = g_offers[--g_offer_count];
+
+        /* Spawn download thread */
+#ifdef _WIN32
+        HANDLE th = (HANDLE)_beginthreadex(NULL, 0, file_download_thread, da, 0, NULL);
+        if (th) CloseHandle(th);
+#else
+        pthread_t th; pthread_create(&th, NULL, file_download_thread, da);
+        pthread_detach(th);
+#endif
+
+        char line[192];
+        snprintf(line, sizeof line, "%s indirmeye başlanıyor...", da->filename);
+        render_system(line);
+    } else if (strncmp(cmd, "/reject", 7) == 0 && (cmd[7] == 0 || cmd[7] == ' ')) {
+        const char *arg = cmd + 7;
+        while (*arg == ' ') arg++;
+        if (!*arg) { render_system("Kullanım: /reject <dosya-adı>"); return; }
+        int idx = -1;
+        for (int i = 0; i < g_offer_count; i++) {
+            if (strcmp(g_offers[i].filename, arg) == 0) { idx = i; break; }
+        }
+        if (idx < 0) { render_system("Böyle bir teklif yok."); return; }
+        uint64_t id = 0; rgcn_random_bytes((uint8_t *)&id, sizeof id);
+        uint64_t ts = rgcn_now_ms();
+        char plain[256];
+        int n = snprintf(plain, sizeof plain,
+                         "FILE_REJECT|%016llX|%016llX|%llu|%s|%016llX",
+                         (unsigned long long)g_station,
+                         (unsigned long long)id,
+                         (unsigned long long)ts,
+                         g_nick,
+                         (unsigned long long)g_offers[idx].offer_id);
+        if (n > 0) send_raw_plaintext(plain, n);
+        g_offers[idx] = g_offers[--g_offer_count];
+        render_system("Reddedildi.");
     } else if (strcmp(cmd, "/help") == 0) {
-        render_system("Komutlar: /quit  /clear  /who  /status  /help");
+        render_system("Komutlar:");
+        render_system("  /quit                   çık");
+        render_system("  /clear                  ekranı temizle");
+        render_system("  /who                    kanaldakileri listele");
+        render_system("  /status                 bağlantı durumu / peer IP'leri");
+        render_system("  /timer <sn>             her mesaj sn saniyede silinsin (/timer off kapatır)");
+        render_system("  /send <dosya>           dosya paylaş (max 50 MB)");
+        render_system("  /send @rumuz <dosya>    sadece belirli kişiye paylaş");
+        render_system("  /accept <dosya-adı>     gelen dosya teklifini kabul et");
+        render_system("  /reject <dosya-adı>     gelen dosya teklifini reddet");
+        render_system("  /help                   bu liste");
     }
     /* Unknown "/..." inputs never reach here - filtered by is_known_command()
      * in on_enter() and sent as regular chat instead. */
 }
 
 static int is_known_command(const char *text) {
+    /* Multi-word commands: match on the first token only. */
     static const char *known[] = {
-        "/quit", "/clear", "/who", "/status", "/help", NULL
+        "/quit", "/clear", "/who", "/status", "/help", "/timer",
+        "/send", "/accept", "/reject", NULL
     };
     for (int i = 0; known[i]; i++) {
-        if (strcmp(text, known[i]) == 0) return 1;
+        size_t klen = strlen(known[i]);
+        if (strncmp(text, known[i], klen) == 0 &&
+            (text[klen] == 0 || text[klen] == ' ')) return 1;
     }
     return 0;
 }
@@ -550,8 +1162,14 @@ static void on_enter(void) {
     }
 
     uint64_t ts = rgcn_now_ms();
-    send_msg("CHAT", text);
-    render_chat(g_nick, text, ts);
+    if (g_timer_ms > 0) {
+        send_kind_ttl("CHAT", text, g_timer_ms);
+        uint64_t line_no = render_burn(g_nick, text, ts, g_timer_ms);
+        schedule_burn(line_no, rgcn_now_ms() + g_timer_ms, g_nick, ts);
+    } else {
+        send_msg("CHAT", text);
+        render_chat(g_nick, text, ts);
+    }
 }
 
 /* -------------------------------------------------------------------------- */

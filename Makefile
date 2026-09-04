@@ -15,7 +15,7 @@ ifeq ($(UNAME_S_TMP),Linux)
     CFLAGS  += -D_GNU_SOURCE
 endif
 LDFLAGS  ?=
-SRC      := src/main.c src/crypto.c src/net.c src/term.c src/notify.c
+SRC      := src/main.c src/crypto.c src/net.c src/term.c src/notify.c src/file.c
 HDR      := $(wildcard src/*.h)
 
 UNAME_S  := $(shell uname -s)
