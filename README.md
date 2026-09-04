@@ -17,15 +17,56 @@ Yerel ağ üzerinde uçtan uca şifreli, kayıt tutmayan, anlık terminal mesajl
 
 ---
 
-## Hızlı Başlangıç (macOS)
+## Kurulum
 
-1. [Releases](https://github.com/Quantre34/RigiconLive/releases/latest) sayfasından **`RigiconLive-universal`** dosyasını indir (Intel + Apple Silicon uyumlu, 118 KB).
-2. Terminalde:
-   ```bash
-   chmod +x RigiconLive-universal
-   ./RigiconLive-universal
-   ```
-3. Gatekeeper uyarı verirse: **Sistem Ayarları > Gizlilik ve Güvenlik** > "Yine de Aç" tıkla, sonra terminale dön ve tekrar çalıştır.
+### Tek Satır (önerilen)
+
+Terminalde `RigiconLive` yazınca doğrudan açılsın istiyorsan tek komut yeter — indirir, kurar, PATH'e ekler:
+
+**macOS / Linux:**
+```bash
+curl -fsSL https://github.com/Quantre34/RigiconLive/raw/main/install.sh | sh
+```
+
+**Windows (PowerShell):**
+```powershell
+iwr -useb https://github.com/Quantre34/RigiconLive/raw/main/install.ps1 | iex
+```
+
+Kurulum bittiğinde yeni bir terminal aç ve yaz:
+
+```
+RigiconLive
+```
+
+İşte bu kadar. Kurulum ne yapıyor:
+- **macOS/Linux:** Binary'yi `/usr/local/bin/RigiconLive`'a koyar (sudo yoksa `~/.local/bin`'e ve `.zshrc`/`.bashrc` dosyasına PATH satırı ekler).
+- **Windows:** `%LOCALAPPDATA%\Programs\RigiconLive\RigiconLive.exe`'ye kopyalar ve kullanıcı PATH'ine ekler (admin gerekmez).
+
+Kaldırmak:
+- macOS/Linux: `rm /usr/local/bin/RigiconLive` (ya da `~/.local/bin/RigiconLive`)
+- Windows: `%LOCALAPPDATA%\Programs\RigiconLive` klasörünü sil, PATH satırını kaldır
+
+### Manuel İndirme
+
+Kurulum scriptini kullanmak istemiyorsan, [Releases](https://github.com/Quantre34/RigiconLive/releases/latest) sayfasından platformuna uygun dosyayı indir:
+
+| Platform | Dosya | Çalıştırma |
+|---|---|---|
+| macOS (Intel + Apple Silicon) | `RigiconLive-macos` | `chmod +x RigiconLive-macos && ./RigiconLive-macos` |
+| Linux (x86_64) | `RigiconLive-linux` | `chmod +x RigiconLive-linux && ./RigiconLive-linux` |
+| Windows (x64) | `RigiconLive.exe` | Çift tıkla veya CMD/PowerShell'de çalıştır |
+
+**macOS notu:** Gatekeeper uyarı verirse: **Sistem Ayarları > Gizlilik ve Güvenlik** > "Yine de Aç". Ya da:
+```bash
+xattr -d com.apple.quarantine ./RigiconLive-macos
+```
+
+**Windows notu:** İmzasız `.exe` için SmartScreen uyarısı çıkarsa "Daha fazla bilgi" > "Yine de çalıştır".
+
+---
+
+## İlk Çalıştırma
 
 Karşılama ekranı sana üç şey sorar:
 
@@ -36,52 +77,6 @@ Sistem bildirimleri alınsın mı? (e/H):
 ```
 
 Enter'a basınca boş bırakılanlar için varsayılan kullanılır. İşte bu kadar. Aynı LAN'daki (aynı WiFi'daki) diğer Rigicon Live kullanıcılarını görürsün, yazışırsın.
-
----
-
-## Windows
-
-Windows kullanıcıları için iki yol var:
-
-### Yol 1: İmzalı `.exe` indir (arkadaşın senden aldıysa)
-
-`RigiconLive.exe` dosyasına çift tıkla. İmzalıysa doğrudan açılır. İmzasızsa **SmartScreen** uyarısı gelir → "Daha fazla bilgi" > "Yine de çalıştır".
-
-### Yol 2: Kaynak koddan derle
-
-Gereksinim: **MinGW-w64** (msys2 üzerinden gelir) veya **Visual Studio Build Tools** (MSVC).
-
-```cmd
-git clone https://github.com/Quantre34/RigiconLive.git
-cd RigiconLive
-platforms\windows\scripts\build.bat
-```
-
-Çıktı: `dist\windows\RigiconLive.exe`.
-
-### İmzalama (opsiyonel ama SmartScreen için önerilir)
-
-Kendi self-signed sertifikanla imzala:
-
-```powershell
-platforms\windows\scripts\generate-cert.ps1    # bir kereye mahsus; .pfx üretir
-platforms\windows\scripts\sign-exe.ps1         # exe'yi imzalar
-```
-
-İmzadan sonra `.exe`'ye sağ tık > **Özellikler > Dijital İmzalar** sekmesinde "Rigicon Inc." görünür.
-
----
-
-## Linux
-
-```bash
-git clone https://github.com/Quantre34/RigiconLive.git
-cd RigiconLive
-make
-./dist/linux/RigiconLive
-```
-
-Gereksinim: `gcc` veya `clang`, `make`. `notify-send` yüklüyse OS bildirimleri de çalışır.
 
 ---
 
@@ -125,7 +120,7 @@ Mesaj yazıp **Enter**'a basınca gönderilir. Herkes senin ismini kendine göre
 Farklı bir sohbet grubu istiyorsan port değiştir. Örnek: pazarlama ekibi 7445'te, yazılım ekibi 7444'te:
 
 ```bash
-./RigiconLive-universal --port 7445
+RigiconLive --port 7445
 ```
 
 Ya da başlangıçta port sorulduğunda `7445` yaz. Aynı porttakiler birbirini duyar, farklı porttakilerden habersizdirler.
@@ -144,7 +139,7 @@ Kullanım: RigiconLive [--nick <isim>] [--port <numara>]
 Örnek — sık kullandığın port ve rumuz için alias:
 
 ```bash
-alias chat='~/bin/RigiconLive-universal --nick sahin --port 7444'
+alias chat='RigiconLive --nick sahin --port 7444'
 ```
 
 ---
@@ -190,7 +185,7 @@ Bazı router'lar multicast paketleri yavaş/güvenilmez şekilde iletir (WiFi st
 **S: macOS "hasarlı" diyor, açtırmıyor.**  
 Gatekeeper karantinası. Bir kez şu komutla temizle:
 ```bash
-xattr -d com.apple.quarantine ./RigiconLive-universal
+xattr -d com.apple.quarantine $(which RigiconLive)
 ```
 Sonra normal şekilde çalıştır.
 
@@ -206,9 +201,12 @@ Başka bir uygulama o portu tutuyor. Farklı bir port seç — 7445, 7500, ne ol
 
 ## Kaynak Koddan Derleme
 
-Tek komut yeter:
+Sadece kendin geliştirmek/incelemek istiyorsan. Normal kullanım için yukarıdaki tek satır kurulum yeterli.
 
 ```bash
+git clone https://github.com/Quantre34/RigiconLive.git
+cd RigiconLive
+
 # macOS / Linux
 make
 
@@ -221,7 +219,18 @@ cc -O2 -Wall -std=c99 -D_DARWIN_C_SOURCE -arch arm64 -arch x86_64 \
 platforms\windows\scripts\build.bat
 ```
 
-Kaynak yapısı:
+### Windows kod imzalama (opsiyonel)
+
+Kendi self-signed sertifikanla `.exe`'yi imzalayabilirsin. SmartScreen uyarısını "trusted publisher" olduğun makinelerde kaldırır:
+
+```powershell
+platforms\windows\scripts\generate-cert.ps1    # bir kereye mahsus; .pfx üretir
+platforms\windows\scripts\sign-exe.ps1         # exe'yi imzalar
+```
+
+İmzadan sonra `.exe`'ye sağ tık > **Özellikler > Dijital İmzalar** sekmesinde "Rigicon Inc." görünür.
+
+### Kaynak yapısı
 
 ```
 src/
@@ -234,6 +243,17 @@ src/
 ```
 
 Toplam ~1560 satır C99. Harici bağımlılık yok.
+
+### Otomatik release (GitHub Actions)
+
+Repo bir CI/CD içeriyor (`.github/workflows/release.yml`). Yeni sürüm yayınlamak için:
+
+```bash
+git tag v1.0.2
+git push --tags
+```
+
+3-4 dakika içinde 3 platform (macOS / Linux / Windows) için binary derlenip Releases sayfasına eklenir.
 
 ---
 
@@ -248,6 +268,7 @@ Toplam ~1560 satır C99. Harici bağımlılık yok.
 
 ## Sürüm
 
+- **1.0.1** — Tek satır kurulum scriptleri (`install.sh`, `install.ps1`) eklendi; GitHub Actions ile 3 platform için otomatik build.
 - **1.0.0** — İlk sürüm. Temel özellik seti tamam.
 
 ## Lisans
