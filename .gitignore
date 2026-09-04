@@ -1,0 +1,20 @@
+# Build artifacts
+build/*.o
+build/*.obj
+build/*.res
+build/certs/
+
+# Compiled binaries (distributed via GitHub Releases, not committed)
+dist/macos/RigiconLive
+dist/macos/RigiconLive-universal
+dist/macos/RigiconLive-arm64
+dist/macos/RigiconLive-x86_64
+dist/linux/RigiconLive
+dist/windows/RigiconLive.exe
+dist/windows/*.pdb
+
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/
+*.swp
