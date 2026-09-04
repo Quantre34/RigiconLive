@@ -1,0 +1,144 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Manuel tag adı (örn: v1.0.1)'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # macOS - Universal binary (Intel + Apple Silicon)
+  # ---------------------------------------------------------------------------
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile universal binary
+        run: |
+          cc -O2 -Wall -std=c99 -D_DARWIN_C_SOURCE \
+             -arch arm64 -arch x86_64 \
+             -o RigiconLive-macos \
+             src/main.c src/crypto.c src/net.c src/term.c src/notify.c \
+             -lpthread
+          file RigiconLive-macos
+          ls -lh RigiconLive-macos
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: RigiconLive-macos
+
+  # ---------------------------------------------------------------------------
+  # Linux - static-ish x86_64
+  # ---------------------------------------------------------------------------
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile
+        run: |
+          cc -O2 -Wall -std=c99 -D_GNU_SOURCE \
+             -o RigiconLive-linux \
+             src/main.c src/crypto.c src/net.c src/term.c src/notify.c \
+             -lpthread
+          file RigiconLive-linux
+          ls -lh RigiconLive-linux
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: RigiconLive-linux
+
+  # ---------------------------------------------------------------------------
+  # Windows - MSVC (x64), embeds .rc metadata, optional code signing
+  # ---------------------------------------------------------------------------
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup MSVC (x64)
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - name: Compile resource
+        shell: cmd
+        run: rc /nologo /fo build\resource.res build\resource.rc
+      - name: Compile executable
+        shell: cmd
+        run: >
+          cl /nologo /O2 /W3 /MT /utf-8
+          /D_CRT_SECURE_NO_WARNINGS /D_WIN32_WINNT=0x0601
+          /FeRigiconLive.exe /Fobuild\
+          src\main.c src\crypto.c src\net.c src\term.c src\notify.c
+          build\resource.res
+          /link ws2_32.lib bcrypt.lib
+      - name: Sign executable (if PFX secret present)
+        if: env.WIN_PFX_BASE64 != ''
+        env:
+          WIN_PFX_BASE64: ${{ secrets.WIN_PFX_BASE64 }}
+          WIN_PFX_PASSWORD: ${{ secrets.WIN_PFX_PASSWORD }}
+        shell: powershell
+        run: |
+          [IO.File]::WriteAllBytes("cert.pfx", [Convert]::FromBase64String($env:WIN_PFX_BASE64))
+          $signtool = (Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Recurse -Filter signtool.exe |
+                       Where-Object { $_.FullName -match "\\x64\\" } |
+                       Sort-Object FullName -Descending | Select-Object -First 1).FullName
+          & $signtool sign /f cert.pfx /p $env:WIN_PFX_PASSWORD `
+              /tr http://timestamp.digicert.com /td sha256 /fd sha256 `
+              /d "Rigicon Live" RigiconLive.exe
+          & $signtool verify /pa RigiconLive.exe
+          Remove-Item cert.pfx
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: RigiconLive.exe
+
+  # ---------------------------------------------------------------------------
+  # Release - collect all artifacts and attach to the tag
+  # ---------------------------------------------------------------------------
+  release:
+    needs: [build-macos, build-linux, build-windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Stage release files
+        run: |
+          mkdir -p release
+          mv artifacts/macos/RigiconLive-macos       release/RigiconLive-macos
+          mv artifacts/linux/RigiconLive-linux       release/RigiconLive-linux
+          mv artifacts/windows/RigiconLive.exe       release/RigiconLive.exe
+          chmod +x release/RigiconLive-macos release/RigiconLive-linux
+          ls -lh release/
+      - name: Determine tag
+        id: tag
+        run: |
+          if [ -n "${{ github.event.inputs.tag }}" ]; then
+            echo "value=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.value }}
+          name: Rigicon Live ${{ steps.tag.outputs.value }}
+          generate_release_notes: true
+          files: release/*
+          body: |
+            ## İndir & çalıştır
+
+            | Platform | Dosya | Nasıl çalıştırılır |
+            |---|---|---|
+            | **macOS** (Intel + Apple Silicon) | `RigiconLive-macos` | `chmod +x RigiconLive-macos && ./RigiconLive-macos` |
+            | **Linux** (x86_64) | `RigiconLive-linux` | `chmod +x RigiconLive-linux && ./RigiconLive-linux` |
+            | **Windows** (x64) | `RigiconLive.exe` | Çift tıkla veya CMD/PowerShell'de çalıştır |
+
+            Ayrıntılı kullanım kılavuzu için [README](https://github.com/Quantre34/RigiconLive#readme) sayfasına bak.
