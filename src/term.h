@@ -21,6 +21,14 @@ const char *rgcn_color_reset(void);
 const char *rgcn_color_gray(void);
 const char *rgcn_color_system(void);
 
+/* Override a nick's palette slot. idx = -1 clears the override and reverts
+ * to auto assignment. Returns the total palette size for range checking. */
+int         rgcn_color_palette_size(void);
+void        rgcn_color_override(const char *nick, int idx);
+int         rgcn_color_current_index(const char *nick);
+const char *rgcn_color_by_index(int idx);
+const char *rgcn_color_name(int idx);
+
 void rgcn_term_clear_screen(void);
 void rgcn_term_clear_current_line(void);
 void rgcn_term_show_cursor(int on);

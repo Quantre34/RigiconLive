@@ -49,14 +49,68 @@ static const char *PALETTE[] = {
     "\x1b[38;5;87m",   /* pale cyan */
     "\x1b[38;5;220m",  /* gold */
 };
+static const char *PALETTE_NAMES[] = {
+    "mavi", "turuncu", "yeşil", "macenta", "sarı", "camgöbeği", "kırmızı",
+    "limon", "pembe", "aqua", "sıcak-pembe", "chartreuse", "koyu-turuncu",
+    "mor", "açık-camgöbeği", "altın"
+};
 #define PALETTE_LEN (sizeof(PALETTE) / sizeof(PALETTE[0]))
 
 #define NICK_CACHE_CAP 64
 static struct {
     char        nick[64];
     int         idx;
+    int         forced;  /* 1 = explicit override, 0 = auto assignment */
 } g_cache[NICK_CACHE_CAP];
 static int g_cache_count = 0;
+
+int rgcn_color_palette_size(void) { return (int)PALETTE_LEN; }
+
+const char *rgcn_color_by_index(int idx) {
+    if (idx < 0) idx = 0;
+    return PALETTE[idx % PALETTE_LEN];
+}
+
+const char *rgcn_color_name(int idx) {
+    if (idx < 0 || idx >= (int)PALETTE_LEN) return "?";
+    return PALETTE_NAMES[idx];
+}
+
+int rgcn_color_current_index(const char *nick) {
+    for (int i = 0; i < g_cache_count; i++) {
+        if (strcmp(g_cache[i].nick, nick) == 0) return g_cache[i].idx % PALETTE_LEN;
+    }
+    return -1;
+}
+
+void rgcn_color_override(const char *nick, int idx) {
+    for (int i = 0; i < g_cache_count; i++) {
+        if (strcmp(g_cache[i].nick, nick) == 0) {
+            if (idx < 0) {
+                g_cache[i].forced = 0;   /* revert to whatever auto has */
+                /* Re-hash into palette so it stays deterministic */
+                g_cache[i].idx = i;
+            } else {
+                g_cache[i].idx = idx % PALETTE_LEN;
+                g_cache[i].forced = 1;
+            }
+            return;
+        }
+    }
+    /* Not cached yet - insert */
+    if (g_cache_count < NICK_CACHE_CAP) {
+        strncpy(g_cache[g_cache_count].nick, nick, sizeof g_cache[0].nick - 1);
+        g_cache[g_cache_count].nick[sizeof g_cache[0].nick - 1] = 0;
+        if (idx < 0) {
+            g_cache[g_cache_count].idx = g_cache_count;
+            g_cache[g_cache_count].forced = 0;
+        } else {
+            g_cache[g_cache_count].idx = idx % PALETTE_LEN;
+            g_cache[g_cache_count].forced = 1;
+        }
+        g_cache_count++;
+    }
+}
 
 const char *rgcn_color_reset(void)  { return "\x1b[0m"; }
 const char *rgcn_color_gray(void)   { return "\x1b[38;5;244m"; }

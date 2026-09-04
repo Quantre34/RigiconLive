@@ -433,7 +433,7 @@ static void print_banner_body(int notify_on) {
     printf("  %sŞifreleme:%s ChaCha20-Poly1305 (AEAD, RFC 8439)\n", gray, rst);
     printf("  %sİz       :%s Sıfır. Kapanınca her şey gider.\n", gray, rst);
     printf("%s%s%s\n", gray, "═══════════════════════════════════════════════════════════", rst);
-    printf("  %sKomutlar: /quit /clear /who /status /timer /send /accept /reject /help%s\n", gray, rst);
+    printf("  %sKomutlar: /quit /clear /who /status /color /timer /send /accept /reject /help%s\n", gray, rst);
     printf("%s%s%s\n\n", gray, "───────────────────────────────────────────────────────────", rst);
     fflush(stdout);
 }
@@ -881,11 +881,77 @@ static RGCN_THREAD_RET file_download_thread(void *ud) {
 #endif
 }
 
+/* Read one shell-style token from `in`. Supports:
+ *   - plain word:       foo bar baz  ->  "foo"
+ *   - double-quoted:    "C:\Users\Nehir Yurtsever\file.png"  ->  content
+ *   - backslash escape inside quotes:  "he said \"hi\""
+ * Returns pointer to next unread char, or NULL if nothing left in `in`. */
+static const char *parse_token(const char *in, char *out, size_t out_cap) {
+    while (*in == ' ' || *in == '\t') in++;
+    if (!*in) { if (out_cap) out[0] = 0; return NULL; }
+    size_t o = 0;
+    if (*in == '"') {
+        in++;
+        while (*in && *in != '"' && o + 1 < out_cap) {
+            if (*in == '\\' && in[1]) in++;   /* accept \" or \\ inside quotes */
+            out[o++] = *in++;
+        }
+        if (*in == '"') in++;
+    } else {
+        while (*in && *in != ' ' && *in != '\t' && o + 1 < out_cap) out[o++] = *in++;
+    }
+    out[o] = 0;
+    return in;
+}
+
 static void handle_command(const char *cmd) {
     if (strcmp(cmd, "/quit") == 0) {
         g_running = 0;
     } else if (strcmp(cmd, "/clear") == 0) {
         reset_screen();
+    } else if (strncmp(cmd, "/color", 6) == 0 && (cmd[6] == 0 || cmd[6] == ' ')) {
+        const char *arg = cmd + 6;
+        while (*arg == ' ') arg++;
+        int pal_n = rgcn_color_palette_size();
+
+        if (!*arg) {
+            /* Show palette + current selection */
+            int cur = rgcn_color_current_index(g_nick);
+            char line[512]; int off = 0;
+            off += snprintf(line, sizeof line, "Renk paleti (senin: %d = %s):",
+                            cur, rgcn_color_name(cur < 0 ? 0 : cur));
+            render_system(line);
+            for (int i = 0; i < pal_n; i += 4) {
+                off = 0; line[0] = 0;
+                for (int j = 0; j < 4 && i + j < pal_n; j++) {
+                    off += snprintf(line + off, sizeof line - off,
+                                    "  %s%2d %s%s ",
+                                    rgcn_color_by_index(i + j), i + j,
+                                    rgcn_color_name(i + j), rgcn_color_reset());
+                }
+                render_system(line);
+            }
+            render_system("Seç:  /color 5   |   Auto:  /color auto");
+        } else if (strcmp(arg, "auto") == 0 || strcmp(arg, "reset") == 0) {
+            rgcn_color_override(g_nick, -1);
+            render_system("Renk auto'ya döndürüldü. (yeniden çizim: /clear)");
+        } else {
+            char *end = NULL;
+            long v = strtol(arg, &end, 10);
+            if (end == arg || v < 0 || v >= pal_n) {
+                char buf[80];
+                snprintf(buf, sizeof buf, "Kullanım: /color 0-%d  |  /color auto", pal_n - 1);
+                render_system(buf);
+            } else {
+                rgcn_color_override(g_nick, (int)v);
+                char buf[128];
+                snprintf(buf, sizeof buf, "Rengin: %s%s%s  (%d)  - yeni mesajlar bu renkle görünecek",
+                         rgcn_color_by_index((int)v),
+                         rgcn_color_name((int)v),
+                         rgcn_color_reset(), (int)v);
+                render_system(buf);
+            }
+        }
     } else if (strncmp(cmd, "/timer", 6) == 0) {
         const char *arg = cmd + 6;
         while (*arg == ' ') arg++;
@@ -967,23 +1033,37 @@ static void handle_command(const char *cmd) {
         if (shown == 0) render_system("  (henüz peer yok - HELLO paketi bekleniyor)");
     } else if (strncmp(cmd, "/send", 5) == 0 && (cmd[5] == 0 || cmd[5] == ' ')) {
         const char *arg = cmd + 5;
-        while (*arg == ' ') arg++;
-        if (!*arg) { render_system("Kullanım: /send <dosya-yolu>  |  /send @rumuz <dosya-yolu>"); return; }
-        /* Optional target: /send @nick /path */
+        char first[RGCN_FILE_MAX_PATH];
         char target[RGCN_MAX_NICK] = {0};
-        if (arg[0] == '@') {
-            arg++;
-            size_t k = 0;
-            while (*arg && *arg != ' ' && k < RGCN_MAX_NICK - 1) target[k++] = *arg++;
-            target[k] = 0;
-            while (*arg == ' ') arg++;
+        char path[RGCN_FILE_MAX_PATH];
+
+        /* Parse first token. Might be @target or a path. */
+        arg = parse_token(arg, first, sizeof first);
+        if (!arg && !first[0]) {
+            render_system("Kullanım: /send <dosya-yolu>  |  /send @rumuz <dosya-yolu>");
+            render_system("  Boşluklu yollar için: /send \"C:\\Users\\Ad Soyad\\file.png\"");
+            return;
         }
-        if (!*arg) { render_system("Kullanım: /send @rumuz <dosya-yolu>"); return; }
-        /* Resolve path relative to cwd */
+        if (first[0] == '@') {
+            strncpy(target, first + 1, sizeof target - 1);
+            target[sizeof target - 1] = 0;
+            arg = parse_token(arg, path, sizeof path);
+            if (!path[0]) { render_system("Kullanım: /send @rumuz <dosya-yolu>"); return; }
+        } else {
+            strncpy(path, first, sizeof path - 1);
+            path[sizeof path - 1] = 0;
+        }
+
         struct stat st;
-        if (stat(arg, &st) != 0 || !S_ISREG(st.st_mode)) {
-            render_system("Dosya bulunamadı."); return;
+        if (stat(path, &st) != 0 || !S_ISREG(st.st_mode)) {
+            char line[RGCN_FILE_MAX_PATH + 64];
+            snprintf(line, sizeof line, "Dosya bulunamadı: %s", path);
+            render_system(line);
+            return;
         }
+        const char *arg_orig = arg;  /* silence unused */
+        (void)arg_orig;
+        arg = path;
         if ((uint64_t)st.st_size > RGCN_FILE_MAX_SIZE) {
             render_system("Dosya çok büyük (>50 MB)."); return;
         }
@@ -1064,13 +1144,12 @@ static void handle_command(const char *cmd) {
         else           snprintf(line, sizeof line, "%s (%s) kanala teklif edildi.", clean_name, sbuf);
         render_system(line);
     } else if (strncmp(cmd, "/accept", 7) == 0 && (cmd[7] == 0 || cmd[7] == ' ')) {
-        const char *arg = cmd + 7;
-        while (*arg == ' ') arg++;
-        if (!*arg) { render_system("Kullanım: /accept <dosya-adı>"); return; }
-        /* Find offer by filename */
+        char name[RGCN_FILE_MAX_NAME];
+        parse_token(cmd + 7, name, sizeof name);
+        if (!name[0]) { render_system("Kullanım: /accept <dosya-adı>"); return; }
         int idx = -1;
         for (int i = 0; i < g_offer_count; i++) {
-            if (strcmp(g_offers[i].filename, arg) == 0) { idx = i; break; }
+            if (strcmp(g_offers[i].filename, name) == 0) { idx = i; break; }
         }
         if (idx < 0) { render_system("Böyle bir teklif yok."); return; }
 
@@ -1125,12 +1204,12 @@ static void handle_command(const char *cmd) {
         snprintf(line, sizeof line, "%s indirmeye başlanıyor...", da->filename);
         render_system(line);
     } else if (strncmp(cmd, "/reject", 7) == 0 && (cmd[7] == 0 || cmd[7] == ' ')) {
-        const char *arg = cmd + 7;
-        while (*arg == ' ') arg++;
-        if (!*arg) { render_system("Kullanım: /reject <dosya-adı>"); return; }
+        char name[RGCN_FILE_MAX_NAME];
+        parse_token(cmd + 7, name, sizeof name);
+        if (!name[0]) { render_system("Kullanım: /reject <dosya-adı>"); return; }
         int idx = -1;
         for (int i = 0; i < g_offer_count; i++) {
-            if (strcmp(g_offers[i].filename, arg) == 0) { idx = i; break; }
+            if (strcmp(g_offers[i].filename, name) == 0) { idx = i; break; }
         }
         if (idx < 0) { render_system("Böyle bir teklif yok."); return; }
         uint64_t id = 0; rgcn_random_bytes((uint8_t *)&id, sizeof id);
@@ -1152,8 +1231,12 @@ static void handle_command(const char *cmd) {
         render_system("  /clear                  ekranı temizle");
         render_system("  /who                    kanaldakileri listele");
         render_system("  /status                 bağlantı durumu / peer IP'leri");
+        render_system("  /color                  rengini seç (paleti gösterir)");
+        render_system("  /color 5                paletten 5 numaralı rengi seç");
+        render_system("  /color auto             otomatik ata (varsayılan)");
         render_system("  /timer <sn>             her mesaj sn saniyede silinsin (/timer off kapatır)");
         render_system("  /send <dosya>           dosya paylaş (max 50 MB)");
+        render_system("  /send \"C:\\yol boşluklu.png\"  boşluklu Windows yolu için tırnak kullan");
         render_system("  /send @rumuz <dosya>    sadece belirli kişiye paylaş");
         render_system("  /accept <dosya-adı>     gelen dosya teklifini kabul et");
         render_system("  /reject <dosya-adı>     gelen dosya teklifini reddet");
@@ -1167,7 +1250,7 @@ static int is_known_command(const char *text) {
     /* Multi-word commands: match on the first token only. */
     static const char *known[] = {
         "/quit", "/clear", "/who", "/status", "/help", "/timer",
-        "/send", "/accept", "/reject", NULL
+        "/color", "/send", "/accept", "/reject", NULL
     };
     for (int i = 0; known[i]; i++) {
         size_t klen = strlen(known[i]);
