@@ -65,9 +65,38 @@ RigiconLive
 - **macOS/Linux:** Binary'yi `/usr/local/bin/RigiconLive`'a koyar (sudo yoksa `~/.local/bin`'e ve `.zshrc`/`.bashrc` dosyasına PATH satırı ekler).
 - **Windows:** `%LOCALAPPDATA%\Programs\RigiconLive\RigiconLive.exe`'ye kopyalar ve kullanıcı PATH'ine ekler (admin gerekmez).
 
-Kaldırmak:
-- macOS/Linux: `rm /usr/local/bin/RigiconLive` (ya da `~/.local/bin/RigiconLive`)
-- Windows: `%LOCALAPPDATA%\Programs\RigiconLive` klasörünü sil, PATH satırını kaldır
+### Güncelleme
+
+Yeni sürüm çıktığında **aynı kurulum komutunu tekrar çalıştır** — mevcut binary'nin üstüne yazar, PATH satırı zaten varsa tekrar eklenmez:
+
+```bash
+# macOS/Linux
+curl -fsSL https://github.com/Quantre34/RigiconLive/raw/main/install.sh | sh
+
+# Windows (PowerShell)
+iwr -useb https://github.com/Quantre34/RigiconLive/raw/main/install.ps1 | iex
+```
+
+### Kaldırma
+
+Tek satır ile:
+
+```bash
+# macOS/Linux
+curl -fsSL https://github.com/Quantre34/RigiconLive/raw/main/uninstall.sh | sh
+
+# Windows (PowerShell)
+iwr -useb https://github.com/Quantre34/RigiconLive/raw/main/uninstall.ps1 | iex
+```
+
+Kaldırma scripti şunları temizler:
+- Binary (`/usr/local/bin/RigiconLive` veya `~/.local/bin/RigiconLive`; Windows'ta `%LOCALAPPDATA%\Programs\RigiconLive` klasörü)
+- `.zshrc`/`.bashrc`/`config.fish` içindeki "Rigicon Live" PATH satırı (Windows'ta user PATH'inden dizin)
+- (Sadece Windows) Kurduğun Rigicon Inc. sertifikası — onay ister
+
+Manuel elden kaldırmak istersen:
+- **macOS/Linux:** `rm ~/.local/bin/RigiconLive` (ya da `/usr/local/bin/RigiconLive`), sonra `~/.zshrc` içinden "Rigicon Live" yorum satırı ve altındaki `export PATH=...` satırını sil.
+- **Windows:** `%LOCALAPPDATA%\Programs\RigiconLive` klasörünü sil. `Sistem > Gelişmiş Sistem Ayarları > Ortam Değişkenleri > Kullanıcı Path`'ten `RigiconLive` içeren girişi kaldır.
 
 ### Manuel İndirme
 
@@ -174,12 +203,15 @@ alias chat='RigiconLive --nick sahin --port 7444'
 
 ## Nasıl Çalışır?
 
-### Ağ
+### Ağ — Üç Katmanlı Dağıtım
 
-- **UDP multicast** grubu `239.74.44.44`, TTL 4 (yerel ağdan çıkmaz).
-- Kanal = port. Bind edilen port aynı olan herkes aynı gruba katılır.
-- Aynı hosttaki iki instance de birbirini duyar (`IP_MULTICAST_LOOP=1`).
-- Anahtar keşif protokolü yok — sadece bağlan ve konuş.
+Rigicon Live her paketi üç farklı yolla iletir. Amaç: WiFi'nin her türlü kötü davranışına dayanıklı olmak.
+
+1. **UDP multicast** — grup `239.74.44.44`, TTL 4. Modern anahtarlarda ideal, aynı hosttaki iki instance de birbirini duyar (`IP_MULTICAST_LOOP=1`).
+2. **Broadcast** — hem limited (`255.255.255.255`) hem de her interface için subnet-directed. Multicast'i filtreleyen ucuz WiFi router'lar için sigorta.
+3. **Unicast peer-cache** — bir peer'ın IP'sini bir kez öğrendik mi (herhangi bir alınan paketten), sonraki mesajlar direkt o cihaza da atılır. WiFi'de unicast **ACK + retransmit** var → paket kaybına karşı bağışık. `nc` neden çalışıyorsa bu da o yüzden çalışır.
+
+Kanal = port. Bind edilen port aynı olan herkes aynı sohbete katılır. Yeni bir peer katıldığında karşılıklı JOIN alışverişi ile iki taraf da birbirini "gördü" olur; ondan sonra tüm konuşma unicast üzerinden akar. Bir cihaz kanaldan ayrılırsa peer cache 5 dakikada temizlenir.
 
 ### Şifreleme
 
@@ -208,7 +240,17 @@ LAN'ın taşıyabildiği kadar. Multicast band genişliği ~250 kişiye kadar ra
 Hayır, tek instance tek porta bağlanır. İki farklı kanalı takip etmek istersen iki terminal aç, ikisinde de `--port` farklı olarak çalıştır.
 
 **S: Kablosuz WiFi'da multicast bazen düşmüyor mu?**  
-Bazı router'lar multicast paketleri yavaş/güvenilmez şekilde iletir (WiFi standardına gömülü bir limitasyon). Sohbet aksarsa router'ın "IGMP snooping" ayarını kapat ya da kablolu bağlantı dene.
+Evet, WiFi'de multicast/broadcast ACK'sız ve en düşük hızda iletilir (bandwidth tasarrufu için) — kayıp oranı %30-70 olabilir. Rigicon Live bunu çözer: peer'ın IP'si bir kez öğrenildikten sonra mesajlar **unicast** olarak da atılır (WiFi'de unicast ACK + retransmit ile güvenilir). Yani ilk JOIN/keşif paketi yeterse, sonrası pürüzsüz akar.
+
+**S: JOIN geldi ama sonrasında hiçbir mesaj gelmiyor. Ne oluyor?**  
+Eski sürümlerde (v1.0.3 ve öncesi) WiFi multicast paket kaybına takılan bilinen bir sorundu. **v1.0.4+**'ta hybrid multicast+broadcast, **v1.0.5+**'ta unicast peer-cache ile çözüldü. İlk yapılacak: en son sürüme güncelle:
+```bash
+# macOS/Linux
+curl -fsSL https://github.com/Quantre34/RigiconLive/raw/main/install.sh | sh
+# Windows
+iwr -useb https://github.com/Quantre34/RigiconLive/raw/main/install.ps1 | iex
+```
+Yine çalışmazsa: (1) macOS Sistem Ayarları > Ağ > Güvenlik Duvarı'nda RigiconLive'ı izin ver, (2) Windows'ta ilk çalıştırmada gelen firewall isteğine "Özel Ağlar" onay ver, (3) `ping <arkadaşın-ip>` çalışıyor mu kontrol et — çalışmıyorsa AP isolation / VLAN engeli var.
 
 **S: macOS "hasarlı" diyor, açtırmıyor.**  
 Gatekeeper karantinası. Bir kez şu komutla temizle:
@@ -296,7 +338,11 @@ git push --tags
 
 ## Sürüm
 
-- **1.0.1** — Tek satır kurulum scriptleri (`install.sh`, `install.ps1`) eklendi; GitHub Actions ile 3 platform için otomatik build.
+- **1.0.5** — Peer-cache unicast: bir cihazın IP'si öğrenildikten sonra mesajlar unicast olarak da atılır (WiFi multicast paket kaybını çözer).
+- **1.0.4** — Hybrid multicast + broadcast: multicast'i filtreleyen router'lar için broadcast fallback.
+- **1.0.3** — Windows kod imzalama (`RigiconInc.cer` + otomatik CI imzalama).
+- **1.0.2** — GitHub Releases'e sertifika dosyası dahil edildi.
+- **1.0.1** — Tek satır kurulum scriptleri, uninstall scriptleri, GitHub Actions ile 3 platform için otomatik build.
 - **1.0.0** — İlk sürüm. Temel özellik seti tamam.
 
 ## Lisans
