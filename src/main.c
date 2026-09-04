@@ -346,7 +346,15 @@ static void handle_decoded(const char *raw, size_t raw_len,
     if (rgcn_net_is_self(g_net, from_ip_be)) from_ip_be = 0;
 
     if (strcmp(kind, "CHAT") == 0) {
-        const char *text = p ? p : "";
+        char *text = p ? p : (char *)"";
+        /* Sanitize text: strip control chars (ANSI escape injection prevention).
+         * A peer with the shared key could otherwise craft a packet that
+         * moves our cursor, clears our screen, or hides output. */
+        for (char *c = text; *c; c++) {
+            unsigned char b = (unsigned char)*c;
+            if (b < 0x20 && b != '\t') *c = '?';
+            if (b == 0x7f) *c = '?';
+        }
         int is_new = peer_touch(nick, (uint64_t)st, from_ip_be, from_port_be);
         render_chat(nick, text, (uint64_t)ts);
         char nbody[RGCN_MAX_TEXT + 64];
