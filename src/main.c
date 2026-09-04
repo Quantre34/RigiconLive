@@ -328,38 +328,49 @@ static void schedule_burn(uint64_t line_no, uint64_t expire_ms,
     g_burn_count++;
 }
 
-/* Called periodically from the receiver thread. Overwrites any expired
- * burn-scheduled line with "(silindi)". Uses save/restore-cursor ANSI so
- * the user's active prompt+input is not disturbed. */
+/* Called periodically from the receiver thread. When a burn timer fires,
+ * we render an inline "X sn önceki süreli mesajı sona erdi" line rather
+ * than trying to reach up the terminal buffer and overwrite the original.
+ *
+ * Rationale: cursor save/restore (\e[s / \e[u) is unreliable once the
+ * terminal has scrolled. Attempting the overwrite corrupted display order
+ * (incoming messages appeared above older content). This approach keeps
+ * everything strictly chronological. */
 static void expire_burns(void) {
+    struct {
+        char     nick[RGCN_MAX_NICK];
+        uint64_t ts_ms;
+    } expired[BURN_SLOTS];
+    int n = 0;
     uint64_t now = rgcn_now_ms();
-    int wrote = 0;
+
     rgcn_term_lock();
     for (int i = 0; i < g_burn_count; ) {
         if (now >= g_burns[i].expire_ms) {
-            /* Cursor is currently on the prompt line, one row below the last
-             * rendered message line. Distance up = (lines printed since burn) + 1. */
-            uint64_t offset = (g_lines_printed - g_burns[i].line_no) + 1;
-            if (offset > 0 && offset < 200) {
-                char tbuf[16]; time_hms(tbuf, sizeof tbuf, g_burns[i].ts_ms);
-                printf("\x1b[s");                    /* save cursor */
-                printf("\x1b[%uA", (unsigned)offset);/* move up */
-                printf("\r\x1b[K");                   /* clear line */
-                printf("%s[%s]%s %s%s%s: %s(silindi)%s",
-                       rgcn_color_gray(), tbuf, rgcn_color_reset(),
-                       rgcn_color_for(g_burns[i].nick),
-                       g_burns[i].nick, rgcn_color_reset(),
-                       rgcn_color_gray(), rgcn_color_reset());
-                printf("\x1b[u");                    /* restore cursor */
-                wrote = 1;
+            if (n < BURN_SLOTS) {
+                strncpy(expired[n].nick, g_burns[i].nick, RGCN_MAX_NICK - 1);
+                expired[n].nick[RGCN_MAX_NICK - 1] = 0;
+                expired[n].ts_ms = g_burns[i].ts_ms;
+                n++;
             }
             g_burns[i] = g_burns[--g_burn_count];
         } else {
             i++;
         }
     }
-    if (wrote) fflush(stdout);
     rgcn_term_unlock();
+
+    for (int i = 0; i < n; i++) {
+        char tbuf[16]; time_hms(tbuf, sizeof tbuf, expired[i].ts_ms);
+        char line[192];
+        snprintf(line, sizeof line,
+                 "%s[%s]%s %s%s%s %s→ süreli mesajı sona erdi%s",
+                 rgcn_color_gray(), tbuf, rgcn_color_reset(),
+                 rgcn_color_for(expired[i].nick),
+                 expired[i].nick, rgcn_color_reset(),
+                 rgcn_color_gray(), rgcn_color_reset());
+        write_line(line);
+    }
 }
 
 /* Clear all burn tracking - called on /clear where the screen (and thus the
