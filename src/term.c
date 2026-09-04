@@ -107,6 +107,13 @@ void rgcn_term_unlock(void) {
 static void enable_bracketed_paste(void)  { printf("\x1b[?2004h"); fflush(stdout); }
 static void disable_bracketed_paste(void) { printf("\x1b[?2004l"); fflush(stdout); }
 
+/* Alternate screen buffer - all rendering happens on a fresh screen that
+ * disappears entirely on exit. Fits the "zero log / kapatınca her şey gider"
+ * design and also gives us a controlled canvas we can redraw without
+ * polluting the parent terminal's scrollback. */
+static void enter_alt_screen(void)  { printf("\x1b[?1049h"); fflush(stdout); }
+static void leave_alt_screen(void)  { printf("\x1b[?1049l"); fflush(stdout); }
+
 void rgcn_term_init(void) {
 #ifdef _WIN32
     if (!g_lock_ready) { InitializeCriticalSection(&g_lock); g_lock_ready = 1; }
@@ -125,6 +132,7 @@ void rgcn_term_init(void) {
     }
     SetConsoleOutputCP(CP_UTF8);
     SetConsoleCP(CP_UTF8);          /* Turkish input bytes as UTF-8, not CP-1254 */
+    enter_alt_screen();
     enable_bracketed_paste();
 #else
     if (tcgetattr(0, &g_saved_termios) == 0) {
@@ -136,6 +144,7 @@ void rgcn_term_init(void) {
         t.c_cc[VTIME] = 0;
         tcsetattr(0, TCSANOW, &t);
     }
+    enter_alt_screen();
     enable_bracketed_paste();
 #endif
     setvbuf(stdout, NULL, _IONBF, 0);
@@ -143,6 +152,7 @@ void rgcn_term_init(void) {
 
 void rgcn_term_restore(void) {
     disable_bracketed_paste();
+    leave_alt_screen();
 #ifdef _WIN32
     if (g_hin  && g_in_mode)  SetConsoleMode(g_hin,  g_in_mode);
     if (g_hout && g_out_mode) SetConsoleMode(g_hout, g_out_mode);

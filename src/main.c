@@ -54,20 +54,20 @@ static size_t     g_input_len = 0;
 static int        g_notify_on = 0;
 static uint32_t   g_timer_ms  = 0;   /* /timer session TTL; 0 = off */
 
-/* Rows advanced since startup - used to locate a burn-scheduled line for
- * later overwrite via ANSI cursor arithmetic. */
-static uint64_t   g_lines_printed = 0;
-
-/* Pending BURN expirations - each records where on screen the line is + when
- * to overwrite it with "(silindi)". */
-#define BURN_SLOTS  128
-static struct {
-    uint64_t line_no;      /* g_lines_printed value at render time */
-    uint64_t expire_ms;    /* absolute rgcn_now_ms() when to fire */
-    char     nick[RGCN_MAX_NICK];
-    uint64_t ts_ms;        /* original message ts, for pretty rewrite */
-} g_burns[BURN_SLOTS];
-static int g_burn_count = 0;
+/* Scrollback that we control. Every visible line is stored here as a fully
+ * formatted ANSI string. When a burn expires, we drop its entry from the log
+ * and repaint the whole visible area from what's left. This is what gives
+ * us actual "silme" without cursor-based overwrite hacks (which corrupted
+ * ordering once the terminal scrolled). */
+#define LOG_CAP 512
+struct log_entry {
+    char     line[RGCN_MAX_TEXT + 256];
+    uint64_t expire_ms;   /* 0 = permanent */
+    int      alive;
+};
+static struct log_entry g_log[LOG_CAP];
+static int g_log_count = 0;   /* how many slots filled (<= LOG_CAP) */
+static int g_log_head  = 0;   /* index of oldest entry when the ring is full */
 
 /* Pending inbound file offers (someone offered a file, we haven't decided). */
 #define OFFER_SLOTS 16
@@ -283,10 +283,57 @@ static void print_prompt_unlocked(void) {
     fflush(stdout);
 }
 
+/* -------------------------------------------------------------------------- */
+/* Message log + redraw                                                        */
+/*                                                                             */
+/* Anything visible on screen is also an entry in g_log. When a burn expires  */
+/* we mark its entry dead (alive=0) and full-redraw the alt screen from what  */
+/* is left. This is the actual silme mechanic - not a cursor-tricks patch.    */
+/* -------------------------------------------------------------------------- */
+
+static int log_iter_idx(int i) {
+    return (g_log_count < LOG_CAP) ? i : (g_log_head + i) % LOG_CAP;
+}
+
+/* Append one fully-formatted line to the log. expire_ms > 0 means the entry
+ * will be removed from the log at that wall-clock timestamp. Ring wraps. */
+static void log_append(const char *line, uint64_t expire_ms) {
+    int idx;
+    if (g_log_count < LOG_CAP) {
+        idx = g_log_count++;
+    } else {
+        idx = g_log_head;
+        g_log_head = (g_log_head + 1) % LOG_CAP;
+    }
+    strncpy(g_log[idx].line, line, sizeof g_log[idx].line - 1);
+    g_log[idx].line[sizeof g_log[idx].line - 1] = 0;
+    g_log[idx].expire_ms = expire_ms;
+    g_log[idx].alive     = 1;
+}
+
+static void log_clear(void) {
+    g_log_count = 0;
+    g_log_head  = 0;
+}
+
+/* Forward decl - defined below after render_banner. */
+static void print_banner_body(int notify_on);
+
+static void redraw_from_log_unlocked(void) {
+    printf("\x1b[H\x1b[2J");   /* home + clear entire visible screen */
+    print_banner_body(g_notify_on);
+    for (int i = 0; i < g_log_count; i++) {
+        int idx = log_iter_idx(i);
+        if (!g_log[idx].alive) continue;
+        printf("%s\n", g_log[idx].line);
+    }
+    print_prompt_unlocked();
+}
+
 static void write_line(const char *line) {
     rgcn_term_lock();
+    log_append(line, 0);
     printf("\r\x1b[K%s\n", line);
-    g_lines_printed++;
     print_prompt_unlocked();
     rgcn_term_unlock();
 }
@@ -301,10 +348,10 @@ static void render_chat(const char *nick, const char *text, uint64_t ts) {
     write_line(line);
 }
 
-/* Render a self-destructing message. Returns the line_no it landed on so the
- * caller can schedule an expiration. */
-static uint64_t render_burn(const char *nick, const char *text, uint64_t ts,
-                            uint32_t ttl_ms) {
+/* Timed message: rendered with a [Ns] tag and scheduled for actual removal
+ * from the log at now + ttl_ms. */
+static void render_burn(const char *nick, const char *text, uint64_t ts,
+                        uint32_t ttl_ms) {
     char tbuf[16]; time_hms(tbuf, sizeof tbuf, ts);
     char line[RGCN_MAX_TEXT + 160];
     snprintf(line, sizeof line,
@@ -313,72 +360,40 @@ static uint64_t render_burn(const char *nick, const char *text, uint64_t ts,
              rgcn_color_for(nick), nick, rgcn_color_reset(),
              text,
              rgcn_color_gray(), ttl_ms / 1000, rgcn_color_reset());
-    write_line(line);
-    return g_lines_printed;   /* value AFTER write_line's increment */
-}
-
-static void schedule_burn(uint64_t line_no, uint64_t expire_ms,
-                          const char *nick, uint64_t ts_ms) {
-    if (g_burn_count >= BURN_SLOTS) return;
-    g_burns[g_burn_count].line_no   = line_no;
-    g_burns[g_burn_count].expire_ms = expire_ms;
-    strncpy(g_burns[g_burn_count].nick, nick, RGCN_MAX_NICK - 1);
-    g_burns[g_burn_count].nick[RGCN_MAX_NICK - 1] = 0;
-    g_burns[g_burn_count].ts_ms     = ts_ms;
-    g_burn_count++;
-}
-
-/* Called periodically from the receiver thread. When a burn timer fires,
- * we render an inline "X sn önceki süreli mesajı sona erdi" line rather
- * than trying to reach up the terminal buffer and overwrite the original.
- *
- * Rationale: cursor save/restore (\e[s / \e[u) is unreliable once the
- * terminal has scrolled. Attempting the overwrite corrupted display order
- * (incoming messages appeared above older content). This approach keeps
- * everything strictly chronological. */
-static void expire_burns(void) {
-    struct {
-        char     nick[RGCN_MAX_NICK];
-        uint64_t ts_ms;
-    } expired[BURN_SLOTS];
-    int n = 0;
-    uint64_t now = rgcn_now_ms();
-
     rgcn_term_lock();
-    for (int i = 0; i < g_burn_count; ) {
-        if (now >= g_burns[i].expire_ms) {
-            if (n < BURN_SLOTS) {
-                strncpy(expired[n].nick, g_burns[i].nick, RGCN_MAX_NICK - 1);
-                expired[n].nick[RGCN_MAX_NICK - 1] = 0;
-                expired[n].ts_ms = g_burns[i].ts_ms;
-                n++;
-            }
-            g_burns[i] = g_burns[--g_burn_count];
-        } else {
-            i++;
+    log_append(line, rgcn_now_ms() + ttl_ms);
+    printf("\r\x1b[K%s\n", line);
+    print_prompt_unlocked();
+    rgcn_term_unlock();
+}
+
+/* Called periodically from the receiver thread. Any log entry whose
+ * expire_ms has passed is marked dead and the whole screen is repainted
+ * from the surviving entries. That is the actual "silme" - the message
+ * disappears from the visible screen entirely, and (because we are in
+ * the alternate screen buffer) also from the scrollback of this session. */
+static void expire_burns(void) {
+    uint64_t now = rgcn_now_ms();
+    int removed = 0;
+    rgcn_term_lock();
+    for (int i = 0; i < g_log_count; i++) {
+        int idx = log_iter_idx(i);
+        if (!g_log[idx].alive) continue;
+        if (g_log[idx].expire_ms == 0) continue;
+        if (now >= g_log[idx].expire_ms) {
+            g_log[idx].alive = 0;
+            removed++;
         }
     }
+    if (removed) redraw_from_log_unlocked();
     rgcn_term_unlock();
-
-    for (int i = 0; i < n; i++) {
-        char tbuf[16]; time_hms(tbuf, sizeof tbuf, expired[i].ts_ms);
-        char line[192];
-        snprintf(line, sizeof line,
-                 "%s[%s]%s %s%s%s %s→ süreli mesajı sona erdi%s",
-                 rgcn_color_gray(), tbuf, rgcn_color_reset(),
-                 rgcn_color_for(expired[i].nick),
-                 expired[i].nick, rgcn_color_reset(),
-                 rgcn_color_gray(), rgcn_color_reset());
-        write_line(line);
-    }
 }
 
-/* Clear all burn tracking - called on /clear where the screen (and thus the
- * ability to visually silme) is wiped anyway. */
-static void reset_burns(void) {
+/* /clear semantics: forget everything we ever rendered + wipe the screen. */
+static void reset_screen(void) {
     rgcn_term_lock();
-    g_burn_count = 0;
-    g_lines_printed = 0;
+    log_clear();
+    redraw_from_log_unlocked();
     rgcn_term_unlock();
 }
 
@@ -391,11 +406,24 @@ static void render_system(const char *text) {
     write_line(line);
 }
 
+/* Full screen redraw wrapper for callers that hold no lock. */
+static void redraw_screen(void) {
+    rgcn_term_lock();
+    redraw_from_log_unlocked();
+    rgcn_term_unlock();
+}
+
+/* Initial banner + subsequent full redraws (Ctrl+L, /clear) both go here.
+ * Callers should not hold term_lock. */
 static void render_banner(int notify_on) {
+    (void)notify_on;
+    redraw_screen();
+}
+
+static void print_banner_body(int notify_on) {
     const char *gray = rgcn_color_gray();
     const char *rst  = rgcn_color_reset();
     const char *me   = rgcn_color_for(g_nick);
-    rgcn_term_clear_screen();
     printf("%s%s%s\n", gray, "═══════════════════════════════════════════════════════════", rst);
     printf("  \x1b[1m\x1b[38;5;39mR I G I C O N   L I V E\x1b[0m   %s· Rigicon Inc.%s\n", gray, rst);
     printf("%s%s%s\n", gray, "═══════════════════════════════════════════════════════════", rst);
@@ -674,8 +702,7 @@ static void handle_decoded(const char *raw, size_t raw_len,
         if (ttl_ms < 1000)      ttl_ms = 1000;      /* min 1s */
         if (ttl_ms > 3600000UL) ttl_ms = 3600000UL; /* max 1h */
         int is_new = peer_touch(nick, (uint64_t)st, from_ip_be, from_port_be);
-        uint64_t line_no = render_burn(nick, text, (uint64_t)ts, (uint32_t)ttl_ms);
-        schedule_burn(line_no, rgcn_now_ms() + ttl_ms, nick, (uint64_t)ts);
+        render_burn(nick, text, (uint64_t)ts, (uint32_t)ttl_ms);
         char nbody[RGCN_MAX_TEXT + 64];
         snprintf(nbody, sizeof nbody, "%s: %s [%us]", nick, text, (unsigned)(ttl_ms/1000));
         rgcn_notify(RGCN_APP_NAME, nbody);
@@ -858,12 +885,7 @@ static void handle_command(const char *cmd) {
     if (strcmp(cmd, "/quit") == 0) {
         g_running = 0;
     } else if (strcmp(cmd, "/clear") == 0) {
-        reset_burns();
-        rgcn_term_clear_screen();
-        render_banner(g_notify_on);
-        rgcn_term_lock();
-        print_prompt_unlocked();
-        rgcn_term_unlock();
+        reset_screen();
     } else if (strncmp(cmd, "/timer", 6) == 0) {
         const char *arg = cmd + 6;
         while (*arg == ' ') arg++;
@@ -1204,8 +1226,7 @@ static void on_enter(void) {
     uint64_t ts = rgcn_now_ms();
     if (g_timer_ms > 0) {
         send_kind_ttl("CHAT", text, g_timer_ms);
-        uint64_t line_no = render_burn(g_nick, text, ts, g_timer_ms);
-        schedule_burn(line_no, rgcn_now_ms() + g_timer_ms, g_nick, ts);
+        render_burn(g_nick, text, ts, g_timer_ms);
     } else {
         send_msg("CHAT", text);
         render_chat(g_nick, text, ts);
