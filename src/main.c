@@ -1153,6 +1153,31 @@ static void on_enter(void) {
     g_input_len = 0;
     g_input[0]  = 0;
 
+    /* Outgoing sanitize: strip control chars (defense in depth - our raw-mode
+     * input already skips them, but pasted content can slip in escapes). */
+    for (char *c = text; *c; c++) {
+        unsigned char b = (unsigned char)*c;
+        if (b < 0x20 && b != '\t') *c = ' ';
+        if (b == 0x7f) *c = ' ';
+    }
+    /* Collapse runs of spaces to a single space + trim ends. Prevents
+     * mass-pasted content from being wall-of-whitespace noise. */
+    size_t r = 0, w = 0;
+    int prev_sp = 1;
+    while (text[r]) {
+        if (text[r] == ' ') {
+            if (!prev_sp) text[w++] = ' ';
+            prev_sp = 1;
+        } else {
+            text[w++] = text[r];
+            prev_sp = 0;
+        }
+        r++;
+    }
+    while (w > 0 && text[w-1] == ' ') w--;
+    text[w] = 0;
+    if (w == 0) return;   /* nothing to send after sanitize */
+
     /* Only route to command handler if this exactly matches a real command.
      * Anything else that starts with '/' (like "/idk" or "/whatever") is
      * treated as a regular chat message. */
@@ -1329,6 +1354,14 @@ int main(int argc, char **argv) {
     }
 #endif
 
+    /* Bracketed-paste state machine. When the terminal wraps a paste with
+     * \e[200~ ... \e[201~ we collapse it into a single message (newlines
+     * become spaces) so a multi-line paste doesn't turn into N sends. */
+    int      esc_state  = 0;       /* 0=normal, 1=saw ESC, 2=in CSI */
+    char     esc_buf[16]; int esc_len = 0;
+    int      paste_mode = 0;
+    static char paste_buf[RGCN_MAX_TEXT]; int paste_len = 0;
+
     /* Main input loop. */
     while (g_running) {
         uint8_t buf[8];
@@ -1336,6 +1369,58 @@ int main(int argc, char **argv) {
         if (n <= 0) continue;
 
         rgcn_term_lock();
+
+        /* --- ESC sequence recognizer (for bracketed paste only) --- */
+        if (esc_state == 1) {
+            if (n == 1 && buf[0] == '[') { esc_state = 2; esc_len = 0; }
+            else                          { esc_state = 0; }
+            rgcn_term_unlock(); continue;
+        }
+        if (esc_state == 2) {
+            if (n == 1) {
+                if (esc_len < (int)sizeof esc_buf - 1) esc_buf[esc_len++] = (char)buf[0];
+                /* CSI terminator = 0x40..0x7E */
+                if (buf[0] >= 0x40 && buf[0] <= 0x7E) {
+                    esc_buf[esc_len] = 0;
+                    if (strcmp(esc_buf, "200~") == 0) {
+                        paste_mode = 1; paste_len = 0;
+                    } else if (strcmp(esc_buf, "201~") == 0 && paste_mode) {
+                        paste_mode = 0;
+                        if (paste_len > 0) {
+                            /* Append pasted chunk to current input, newline→space. */
+                            for (int i = 0; i < paste_len; i++) {
+                                unsigned char c = (unsigned char)paste_buf[i];
+                                if (c == '\r' || c == '\n' || c == '\t') paste_buf[i] = ' ';
+                                if (c < 0x20 || c == 0x7f) paste_buf[i] = ' ';
+                            }
+                            size_t room = sizeof g_input - 1 - g_input_len;
+                            size_t take = (size_t)paste_len < room ? (size_t)paste_len : room;
+                            memcpy(g_input + g_input_len, paste_buf, take);
+                            g_input_len += take;
+                            g_input[g_input_len] = 0;
+                            print_prompt_unlocked();
+                        }
+                    }
+                    esc_state = 0;
+                }
+            }
+            rgcn_term_unlock(); continue;
+        }
+        if (n == 1 && buf[0] == 0x1B) {
+            esc_state = 1;
+            rgcn_term_unlock(); continue;
+        }
+
+        /* --- Inside a paste: buffer everything until \e[201~ arrives --- */
+        if (paste_mode) {
+            if (paste_len + n < (int)sizeof paste_buf) {
+                memcpy(paste_buf + paste_len, buf, n);
+                paste_len += n;
+            }
+            rgcn_term_unlock(); continue;
+        }
+
+        /* --- Normal typed input --- */
         if (n == 1 && buf[0] == 0x03) {           /* Ctrl+C */
             g_running = 0;
             rgcn_term_unlock();

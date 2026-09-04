@@ -104,6 +104,9 @@ void rgcn_term_unlock(void) {
 /* Raw mode                                                                    */
 /* -------------------------------------------------------------------------- */
 
+static void enable_bracketed_paste(void)  { printf("\x1b[?2004h"); fflush(stdout); }
+static void disable_bracketed_paste(void) { printf("\x1b[?2004l"); fflush(stdout); }
+
 void rgcn_term_init(void) {
 #ifdef _WIN32
     if (!g_lock_ready) { InitializeCriticalSection(&g_lock); g_lock_ready = 1; }
@@ -122,6 +125,7 @@ void rgcn_term_init(void) {
     }
     SetConsoleOutputCP(CP_UTF8);
     SetConsoleCP(CP_UTF8);          /* Turkish input bytes as UTF-8, not CP-1254 */
+    enable_bracketed_paste();
 #else
     if (tcgetattr(0, &g_saved_termios) == 0) {
         g_termios_saved = 1;
@@ -132,11 +136,13 @@ void rgcn_term_init(void) {
         t.c_cc[VTIME] = 0;
         tcsetattr(0, TCSANOW, &t);
     }
+    enable_bracketed_paste();
 #endif
     setvbuf(stdout, NULL, _IONBF, 0);
 }
 
 void rgcn_term_restore(void) {
+    disable_bracketed_paste();
 #ifdef _WIN32
     if (g_hin  && g_in_mode)  SetConsoleMode(g_hin,  g_in_mode);
     if (g_hout && g_out_mode) SetConsoleMode(g_hout, g_out_mode);
