@@ -77,26 +77,90 @@ curl -fsSL https://github.com/Quantre34/RigiconLive/raw/main/install.sh | sh
 iwr -useb https://github.com/Quantre34/RigiconLive/raw/main/install.ps1 | iex
 ```
 
-### Kaldırma
+### Kaldırma (Uninstall)
 
-Tek satır ile:
+Tek satır kaldırma — kurulumdan geriye hiçbir şey bırakmaz:
 
 ```bash
-# macOS/Linux
+# macOS / Linux
 curl -fsSL https://github.com/Quantre34/RigiconLive/raw/main/uninstall.sh | sh
+```
 
+```powershell
 # Windows (PowerShell)
 iwr -useb https://github.com/Quantre34/RigiconLive/raw/main/uninstall.ps1 | iex
 ```
 
-Kaldırma scripti şunları temizler:
-- Binary (`/usr/local/bin/RigiconLive` veya `~/.local/bin/RigiconLive`; Windows'ta `%LOCALAPPDATA%\Programs\RigiconLive` klasörü)
-- `.zshrc`/`.bashrc`/`config.fish` içindeki "Rigicon Live" PATH satırı (Windows'ta user PATH'inden dizin)
-- (Sadece Windows) Kurduğun Rigicon Inc. sertifikası — onay ister
+**Ne temizleniyor:**
 
-Manuel elden kaldırmak istersen:
-- **macOS/Linux:** `rm ~/.local/bin/RigiconLive` (ya da `/usr/local/bin/RigiconLive`), sonra `~/.zshrc` içinden "Rigicon Live" yorum satırı ve altındaki `export PATH=...` satırını sil.
-- **Windows:** `%LOCALAPPDATA%\Programs\RigiconLive` klasörünü sil. `Sistem > Gelişmiş Sistem Ayarları > Ortam Değişkenleri > Kullanıcı Path`'ten `RigiconLive` içeren girişi kaldır.
+| Platform | Binary | PATH | Sertifika |
+|---|---|---|---|
+| macOS/Linux | `~/.local/bin/RigiconLive` **veya** `/usr/local/bin/RigiconLive` | `~/.zshrc` / `~/.bashrc` / `~/.config/fish/config.fish` içindeki `# Rigicon Live` yorumu + altındaki `export PATH=...` satırı | *(macOS'ta sertifika kurulmuyor)* |
+| Windows | `%LOCALAPPDATA%\Programs\RigiconLive\` klasörü tümüyle | User PATH'inden `RigiconLive` içeren giriş | `Cert:\CurrentUser\Root` ve `\TrustedPublisher`'daki `Rigicon Inc.` sertifikası (soru sorar) |
+
+Kaldırdıktan sonra **yeni bir terminal** aç, `RigiconLive` yaz — "command not found" görmelisin. Görüyorsan başarılı.
+
+#### Manuel Kaldırma — macOS / Linux
+
+Bilgisayarında ne olduğunu kendi gözünle görüp elden silmek istersen:
+
+```bash
+# 1. Binary'lerin nerede olduğunu bul
+which -a RigiconLive
+ls -la /usr/local/bin/RigiconLive ~/.local/bin/RigiconLive 2>/dev/null
+
+# 2. Binary'yi sil (yazma iznine göre sudo gerekebilir)
+rm -f ~/.local/bin/RigiconLive
+sudo rm -f /usr/local/bin/RigiconLive       # root olarak kurduysan
+
+# 3. Shell rc dosyasından PATH satırını temizle
+#    (aşağıdakini kendi shell'ine göre seç: .zshrc / .bashrc / config.fish)
+# .zshrc / .bashrc icin: "# Rigicon Live" satırını ve altındaki export'u sil
+nano ~/.zshrc
+# ...içinde şu iki satırı bul ve sil:
+#   # Rigicon Live
+#   export PATH="$HOME/.local/bin:$PATH"
+
+# 4. Yeni bir terminal ac, dogrula:
+which RigiconLive        # ciktisi bos olmali
+```
+
+#### Manuel Kaldırma — Windows
+
+```powershell
+# 1. Kurulu binary klasorunu sil
+Remove-Item -Recurse -Force "$env:LOCALAPPDATA\Programs\RigiconLive"
+
+# 2. PATH'ten cikar
+$p = [Environment]::GetEnvironmentVariable("Path", "User")
+$new = ($p -split ";") | Where-Object { $_ -notmatch "RigiconLive" }
+[Environment]::SetEnvironmentVariable("Path", ($new -join ";"), "User")
+
+# 3. (Opsiyonel) Rigicon Inc. sertifikasini kaldir
+Get-ChildItem Cert:\CurrentUser\Root, Cert:\CurrentUser\TrustedPublisher |
+    Where-Object { $_.Subject -match "Rigicon Inc\." } | Remove-Item
+
+# 4. Yeni bir PowerShell ac, dogrula:
+Get-Command RigiconLive          # "cannot find" hatasi almalısın
+```
+
+GUI ile PATH temizlemek istersen:
+1. Başlat > **"environment variables"** yaz > "Kullanıcı için ortam değişkenlerini düzenle"
+2. Üst kutuda **Path**'i seç > **Düzenle...**
+3. `RigiconLive` içeren satırı bul > **Sil** > Tamam
+4. Açık PowerShell/CMD'yi kapat, yeni aç → PATH güncellendi
+
+Sertifikayı GUI ile kaldırmak istersen: **certmgr.msc** çalıştır > "Güvenilen Kök Sertifika Yetkilileri" ve "Güvenilen Yayımcılar" altında "Rigicon Inc."'i bul, sağ tık > Sil.
+
+#### Sorun Giderme
+
+**"Permission denied" hatası alıyorsam:** Binary sudo ile kurulmuş demektir (`/usr/local/bin/`). Silmek için `sudo rm /usr/local/bin/RigiconLive`.
+
+**Uninstall script çalıştı ama `RigiconLive` hâlâ tanınıyor:** Muhtemelen açık terminalinin PATH'i eski. Bir yeni terminal aç ve tekrar dene.
+
+**Kurulumdan hiçbir iz kalmasın istiyorum:**
+- macOS'ta uygulama hiçbir dosya oluşturmuyor (bakış açısı olarak "sıfır kayıt" tasarımı). Sadece binary + `.zshrc` satırı temizlenir; başka hiçbir şey yok.
+- Windows'ta aynı — `%LOCALAPPDATA%\Programs\RigiconLive` klasörü + PATH + sertifika dışında hiçbir dosya, log, registry anahtarı yok.
 
 ### Manuel İndirme
 
@@ -167,7 +231,8 @@ Mesaj yazıp **Enter**'a basınca gönderilir. Herkes senin ismini kendine göre
 |---|---|
 | `/quit` | Kanaldan çıkar, uygulamayı kapatır (Ctrl+C ile aynı) |
 | `/clear` | Ekranı temizler, banner'ı yeniden çizer |
-| `/who` | Son 60 saniyede aktivite gösteren kullanıcıları listeler |
+| `/who` | Son 90 saniyede aktivite gösteren kullanıcıları listeler |
+| `/status` | Bağlantı durumu — kendi station ID'in + her peer'ın IP:port'u, son aktivite süresi, unicast/broadcast durumu |
 | `/help` | Komut listesini gösterir |
 | `Ctrl+L` | `/clear` ile aynı |
 | `Ctrl+C` | Çıkış |
@@ -338,6 +403,7 @@ git push --tags
 
 ## Sürüm
 
+- **1.0.6** — Rejoin bug fix: peer'ı (nick + station_id) ile takip et, session değişince yeni say. Her 30s HELLO heartbeat. 90s inaktif peer otomatik "ayrıldı". Yeni `/status` komutu (peer'ların IP/port/latency).
 - **1.0.5** — Peer-cache unicast: bir cihazın IP'si öğrenildikten sonra mesajlar unicast olarak da atılır (WiFi multicast paket kaybını çözer).
 - **1.0.4** — Hybrid multicast + broadcast: multicast'i filtreleyen router'lar için broadcast fallback.
 - **1.0.3** — Windows kod imzalama (`RigiconInc.cer` + otomatik CI imzalama).

@@ -51,14 +51,29 @@ static int        g_notify_on = 0;
 static uint64_t g_seen[SEEN_CAP];
 static int      g_seen_pos = 0;
 
-#define PEERS_CAP 64
+#define PEERS_CAP    64
+#define PEER_STALE_MS   90000    /* 90s without a packet = presume gone */
+#define HEARTBEAT_MS    30000    /* re-announce ourselves every 30s */
+
 static struct {
     char     nick[RGCN_MAX_NICK];
+    uint64_t station;
     uint64_t last_ms;
     uint32_t ip_be;
     uint16_t port_be;
 } g_peers[PEERS_CAP];
 static int g_peer_count = 0;
+
+#ifdef _WIN32
+  static CRITICAL_SECTION g_peer_lock;
+  static int              g_peer_lock_ready = 0;
+  #define PEER_LOCK()   do { if (!g_peer_lock_ready) { InitializeCriticalSection(&g_peer_lock); g_peer_lock_ready = 1; } EnterCriticalSection(&g_peer_lock); } while (0)
+  #define PEER_UNLOCK() LeaveCriticalSection(&g_peer_lock)
+#else
+  static pthread_mutex_t g_peer_lock = PTHREAD_MUTEX_INITIALIZER;
+  #define PEER_LOCK()   pthread_mutex_lock(&g_peer_lock)
+  #define PEER_UNLOCK() pthread_mutex_unlock(&g_peer_lock)
+#endif
 
 /* -------------------------------------------------------------------------- */
 /* Utilities                                                                   */
@@ -83,37 +98,77 @@ static int already_seen(uint64_t id) {
     return 0;
 }
 
-/* Returns 1 if this is a newly-seen peer, 0 if refresh of existing. */
-static int peer_touch(const char *nick, uint32_t ip_be, uint16_t port_be) {
+/* Returns 1 if this is a newly-seen station (new nick, new session, or new
+ * address), 0 if refresh of the same session we've been talking to. Used to
+ * decide whether to echo-back JOIN so both sides converge on each other's IP. */
+static int peer_touch(const char *nick, uint64_t station,
+                      uint32_t ip_be, uint16_t port_be) {
+    PEER_LOCK();
     uint64_t now = rgcn_now_ms();
     for (int i = 0; i < g_peer_count; i++) {
         if (strcmp(g_peers[i].nick, nick) == 0) {
+            int changed = (g_peers[i].station != station)
+                       || (ip_be   && g_peers[i].ip_be   != ip_be)
+                       || (port_be && g_peers[i].port_be != port_be);
+            g_peers[i].station = station;
             g_peers[i].last_ms = now;
             if (ip_be)   g_peers[i].ip_be   = ip_be;
             if (port_be) g_peers[i].port_be = port_be;
-            return 0;
+            PEER_UNLOCK();
+            return changed ? 1 : 0;
         }
     }
     if (g_peer_count < PEERS_CAP) {
         strncpy(g_peers[g_peer_count].nick, nick, RGCN_MAX_NICK - 1);
         g_peers[g_peer_count].nick[RGCN_MAX_NICK - 1] = 0;
+        g_peers[g_peer_count].station = station;
         g_peers[g_peer_count].last_ms = now;
         g_peers[g_peer_count].ip_be   = ip_be;
         g_peers[g_peer_count].port_be = port_be;
         g_peer_count++;
+        PEER_UNLOCK();
         return 1;
     }
+    PEER_UNLOCK();
     return 0;
 }
 
 static void peer_drop(const char *nick) {
+    PEER_LOCK();
     for (int i = 0; i < g_peer_count; i++) {
         if (strcmp(g_peers[i].nick, nick) == 0) {
             g_peers[i] = g_peers[g_peer_count - 1];
             g_peer_count--;
-            return;
+            break;
         }
     }
+    PEER_UNLOCK();
+}
+
+/* Expire peers we havent heard from in PEER_STALE_MS and report each one
+ * via callback. Called periodically from the receiver thread. */
+static void peer_expire_stale(void (*on_drop)(const char *)) {
+    char dropped[PEERS_CAP][RGCN_MAX_NICK];
+    int  drop_count = 0;
+    uint64_t now = rgcn_now_ms();
+
+    PEER_LOCK();
+    for (int i = 0; i < g_peer_count; ) {
+        if (now - g_peers[i].last_ms > PEER_STALE_MS) {
+            if (drop_count < PEERS_CAP) {
+                strncpy(dropped[drop_count], g_peers[i].nick, RGCN_MAX_NICK - 1);
+                dropped[drop_count][RGCN_MAX_NICK - 1] = 0;
+                drop_count++;
+            }
+            g_peers[i] = g_peers[g_peer_count - 1];
+            g_peer_count--;
+        } else {
+            i++;
+        }
+    }
+    PEER_UNLOCK();
+
+    for (int i = 0; i < drop_count; i++) on_drop(dropped[i]);
 }
 
 /* -------------------------------------------------------------------------- */
@@ -180,7 +235,7 @@ static void render_banner(int notify_on) {
     printf("  %sŞifreleme:%s ChaCha20-Poly1305 (AEAD, RFC 8439)\n", gray, rst);
     printf("  %sİz       :%s Sıfır. Kapanınca her şey gider.\n", gray, rst);
     printf("%s%s%s\n", gray, "═══════════════════════════════════════════════════════════", rst);
-    printf("  %sKomutlar: /quit  /clear  /who  /help    Enter ile gönder%s\n", gray, rst);
+    printf("  %sKomutlar: /quit  /clear  /who  /status  /help    Enter ile gönder%s\n", gray, rst);
     printf("%s%s%s\n\n", gray, "───────────────────────────────────────────────────────────", rst);
     fflush(stdout);
 }
@@ -231,12 +286,22 @@ static void send_msg(const char *kind, const char *text) {
      * Unreliable on WiFi (packet loss up to 70%) but reaches new peers. */
     rgcn_net_broadcast(g_net, pkt, pkt_len);
 
-    /* Reliable path: unicast to every known peer (ACKed at WiFi layer). */
+    /* Reliable path: unicast to every known peer (ACKed at WiFi layer).
+     * Snapshot under lock, send unlocked (no network I/O while holding lock). */
+    struct { uint32_t ip; uint16_t port; } snap[PEERS_CAP];
+    int snap_n = 0;
     uint64_t now = rgcn_now_ms();
+    PEER_LOCK();
     for (int i = 0; i < g_peer_count; i++) {
         if (!g_peers[i].ip_be || !g_peers[i].port_be) continue;
-        if (now - g_peers[i].last_ms > 300000) continue;  /* 5 min stale cutoff */
-        rgcn_net_unicast(g_net, g_peers[i].ip_be, g_peers[i].port_be, pkt, pkt_len);
+        if (now - g_peers[i].last_ms > PEER_STALE_MS) continue;
+        snap[snap_n].ip   = g_peers[i].ip_be;
+        snap[snap_n].port = g_peers[i].port_be;
+        snap_n++;
+    }
+    PEER_UNLOCK();
+    for (int i = 0; i < snap_n; i++) {
+        rgcn_net_unicast(g_net, snap[i].ip, snap[i].port, pkt, pkt_len);
     }
 }
 
@@ -282,17 +347,24 @@ static void handle_decoded(const char *raw, size_t raw_len,
 
     if (strcmp(kind, "CHAT") == 0) {
         const char *text = p ? p : "";
-        (void)peer_touch(nick, from_ip_be, from_port_be);
+        int is_new = peer_touch(nick, (uint64_t)st, from_ip_be, from_port_be);
         render_chat(nick, text, (uint64_t)ts);
         char nbody[RGCN_MAX_TEXT + 64];
         snprintf(nbody, sizeof nbody, "%s: %s", nick, text);
         rgcn_notify(RGCN_APP_NAME, nbody);
-    } else if (strcmp(kind, "JOIN") == 0) {
-        int is_new = peer_touch(nick, from_ip_be, from_port_be);
-        char line[128];
-        snprintf(line, sizeof line, "%s kanala katıldı", nick);
-        render_system(line);
-        /* Only echo-back for genuinely new peers, so we don't ping-pong. */
+        /* If a peer starts CHATting without us seeing their JOIN (broadcast
+         * was lost), still send them our address unicast. */
+        if (is_new && from_ip_be && from_port_be) send_msg("JOIN", NULL);
+    } else if (strcmp(kind, "JOIN") == 0 || strcmp(kind, "HELLO") == 0) {
+        int is_new = peer_touch(nick, (uint64_t)st, from_ip_be, from_port_be);
+        /* Only announce genuinely new sessions - don't render echo-back
+         * JOINs, HELLO heartbeats, or re-broadcasts. */
+        if (is_new && strcmp(kind, "JOIN") == 0) {
+            char line[128];
+            snprintf(line, sizeof line, "%s kanala katıldı", nick);
+            render_system(line);
+        }
+        /* Echo-back so the new peer learns our IP too. */
         if (is_new && from_ip_be && from_port_be) send_msg("JOIN", NULL);
     } else if (strcmp(kind, "LEAVE") == 0) {
         peer_drop(nick);
@@ -306,18 +378,35 @@ static void handle_decoded(const char *raw, size_t raw_len,
 /* Receiver thread                                                             */
 /* -------------------------------------------------------------------------- */
 
+static void on_peer_timeout(const char *nick) {
+    char line[128];
+    snprintf(line, sizeof line, "%s kanaldan ayrıldı (yanıt yok)", nick);
+    render_system(line);
+}
+
 static RGCN_THREAD_RET receiver_thread(void *arg) {
     (void)arg;
     uint8_t pkt[RGCN_MAX_PACKET];
     uint8_t plain[RGCN_MAX_PACKET];
+    uint64_t last_heartbeat = rgcn_now_ms();
+
     while (g_running) {
         uint32_t from_ip = 0;
         uint16_t from_port = 0;
         int r = rgcn_net_recv(g_net, pkt, sizeof pkt, 500, &from_ip, &from_port);
-        if (r <= 0) continue;
-        size_t plain_len = 0;
-        if (rgcn_open(pkt, (size_t)r, plain, sizeof plain, &plain_len) != 0) continue;
-        handle_decoded((const char *)plain, plain_len, from_ip, from_port);
+        if (r > 0) {
+            size_t plain_len = 0;
+            if (rgcn_open(pkt, (size_t)r, plain, sizeof plain, &plain_len) == 0)
+                handle_decoded((const char *)plain, plain_len, from_ip, from_port);
+        }
+
+        /* Periodic maintenance: expire stale peers + re-announce presence. */
+        uint64_t now = rgcn_now_ms();
+        if (now - last_heartbeat >= HEARTBEAT_MS) {
+            peer_expire_stale(on_peer_timeout);
+            send_msg("HELLO", NULL);
+            last_heartbeat = now;
+        }
     }
 #ifdef _WIN32
     return 0;
@@ -368,8 +457,9 @@ static void handle_command(const char *cmd) {
         char line[512]; line[0] = 0;
         int off = 0;
         int count = 0;
+        PEER_LOCK();
         for (int i = 0; i < g_peer_count; i++) {
-            if (now - g_peers[i].last_ms > 60000) continue;
+            if (now - g_peers[i].last_ms > PEER_STALE_MS) continue;
             const char *c = rgcn_color_for(g_peers[i].nick);
             off += snprintf(line + off, sizeof line - off,
                             "%s%s%s%s", count ? ", " : "", c,
@@ -377,14 +467,44 @@ static void handle_command(const char *cmd) {
             count++;
             if (off >= (int)sizeof line - 64) break;
         }
+        PEER_UNLOCK();
         if (count == 0) render_system("Kanalda başka kimse yok.");
         else {
             char full[600];
             snprintf(full, sizeof full, "Kanaldakiler (%d): %s", count, line);
             render_system(full);
         }
+    } else if (strcmp(cmd, "/status") == 0) {
+        char line[128];
+        snprintf(line, sizeof line, "Port %d dinleniyor, station=%016llX",
+                 g_port, (unsigned long long)g_station);
+        render_system(line);
+        uint64_t now = rgcn_now_ms();
+        int shown = 0;
+        PEER_LOCK();
+        for (int i = 0; i < g_peer_count; i++) {
+            if (now - g_peers[i].last_ms > PEER_STALE_MS) continue;
+            uint8_t  *ip_b = (uint8_t *)&g_peers[i].ip_be;
+            uint8_t  *pt_b = (uint8_t *)&g_peers[i].port_be;
+            uint16_t port_h = ((uint16_t)pt_b[0] << 8) | pt_b[1];
+            const char *reach = g_peers[i].ip_be ? "unicast" : "broadcast";
+            char buf[256];
+            snprintf(buf, sizeof buf,
+                     "  %s%s%s  %u.%u.%u.%u:%u  son:%llus  yol:%s",
+                     rgcn_color_for(g_peers[i].nick),
+                     g_peers[i].nick,
+                     rgcn_color_reset(),
+                     ip_b[0], ip_b[1], ip_b[2], ip_b[3],
+                     port_h,
+                     (unsigned long long)((now - g_peers[i].last_ms) / 1000),
+                     reach);
+            render_system(buf);
+            shown++;
+        }
+        PEER_UNLOCK();
+        if (shown == 0) render_system("  (henüz peer yok - HELLO paketi bekleniyor)");
     } else if (strcmp(cmd, "/help") == 0) {
-        render_system("Komutlar: /quit  /clear  /who  /help");
+        render_system("Komutlar: /quit  /clear  /who  /status  /help");
     } else {
         render_system("Bilinmeyen komut. /help yaz.");
     }
