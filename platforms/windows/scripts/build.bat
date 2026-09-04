@@ -10,7 +10,7 @@ pushd "%~dp0..\..\.."
 if not exist dist\windows mkdir dist\windows
 if not exist build         mkdir build
 
-set SRC=src\main.c src\crypto.c src\net.c src\term.c src\notify.c
+set SRC=src\main.c src\crypto.c src\net.c src\term.c src\notify.c src\file.c
 
 REM ---- MinGW-w64 (preferred: produces a smaller, dependency-free static exe)
 where gcc >nul 2>&1

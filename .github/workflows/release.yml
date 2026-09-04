@@ -26,7 +26,7 @@ jobs:
           cc -O2 -Wall -std=c99 -D_DARWIN_C_SOURCE \
              -arch arm64 -arch x86_64 \
              -o RigiconLive-macos \
-             src/main.c src/crypto.c src/net.c src/term.c src/notify.c \
+             src/main.c src/crypto.c src/net.c src/term.c src/notify.c src/file.c \
              -lpthread
           file RigiconLive-macos
           ls -lh RigiconLive-macos
@@ -46,7 +46,7 @@ jobs:
         run: |
           cc -O2 -Wall -std=c99 -D_GNU_SOURCE \
              -o RigiconLive-linux \
-             src/main.c src/crypto.c src/net.c src/term.c src/notify.c \
+             src/main.c src/crypto.c src/net.c src/term.c src/notify.c src/file.c \
              -lpthread
           file RigiconLive-linux
           ls -lh RigiconLive-linux
@@ -75,7 +75,7 @@ jobs:
           cl /nologo /O2 /W3 /MT /utf-8
           /D_CRT_SECURE_NO_WARNINGS /D_WIN32_WINNT=0x0601
           /FeRigiconLive.exe /Fobuild\
-          src\main.c src\crypto.c src\net.c src\term.c src\notify.c
+          src\main.c src\crypto.c src\net.c src\term.c src\notify.c src\file.c
           build\resource.res
           /link ws2_32.lib bcrypt.lib
       - name: Sign executable (if PFX secret present)

@@ -23,6 +23,10 @@
 #include <signal.h>
 #include <sys/stat.h>
 
+#ifndef S_ISREG
+  #define S_ISREG(m) (((m) & S_IFMT) == S_IFREG)
+#endif
+
 #ifdef _WIN32
   #include <windows.h>
   #include <process.h>
