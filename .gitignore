@@ -19,6 +19,9 @@ dist/linux/RigiconLive
 dist/windows/RigiconLive.exe
 dist/windows/*.pdb
 
+# Stray file that some `install` command versions create in cwd
+/install
+
 # Editor / OS
 .DS_Store
 .vscode/
