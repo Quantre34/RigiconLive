@@ -1,0 +1,36 @@
+/* Rigicon Live - Windows executable metadata.
+ * Compile with:
+ *   MinGW:  windres build\resource.rc -O coff -o build\resource.res
+ *   MSVC:   rc /nologo /fo build\resource.res build\resource.rc
+ */
+
+#include <winver.h>
+
+1 VERSIONINFO
+FILEVERSION     1,0,0,0
+PRODUCTVERSION  1,0,0,0
+FILEFLAGSMASK   0x3fL
+FILEFLAGS       0x0L
+FILEOS          0x40004L         /* VOS_NT_WINDOWS32 */
+FILETYPE        0x1L             /* VFT_APP */
+FILESUBTYPE     0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904b0"         /* U.S. English, Unicode */
+        BEGIN
+            VALUE "CompanyName",      "Rigicon Inc."
+            VALUE "FileDescription",  "Rigicon Live - Encrypted Terminal Messaging"
+            VALUE "FileVersion",      "1.0.0.0"
+            VALUE "InternalName",     "RigiconLive"
+            VALUE "LegalCopyright",   "Copyright (c) Rigicon Inc."
+            VALUE "OriginalFilename", "RigiconLive.exe"
+            VALUE "ProductName",      "Rigicon Live"
+            VALUE "ProductVersion",   "1.0.0.0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END
