@@ -1,6 +1,10 @@
 # Rigicon Live
 
+**Yazar:** [Quantre34](https://github.com/Quantre34) — **Lisans:** MIT ([LICENSE](LICENSE))
+
 Yerel ağ üzerinde uçtan uca şifreli, kayıt tutmayan, anlık terminal mesajlaşma uygulaması. Bir telsiz gibi: aynı frekansa (porta) tutunan herkes birbirini duyar. Uygulama kapanınca hiçbir iz kalmaz.
+
+> **\* "Rigicon Live" adı hakkında:** Bu isim, uygulamayı Rigicon Inc.'de çalışan arkadaşlarımla birlikte kullanmam nedeniyle verilmiştir. Yazılımın **yazarı ve tüm hakları Quantre34'e aittir.** Windows kod imzalama sertifikası "Rigicon Inc." adıyla düzenlenmiştir — bu sadece mevcut kurulumların güncellemeleri kesintisiz doğrulayabilmesi için sabit tutulan bir build-artifact kimliğidir, herhangi bir hak devri anlamına gelmez.
 
 ---
 
@@ -411,6 +415,25 @@ git push --tags
 - **1.0.1** — Tek satır kurulum scriptleri, uninstall scriptleri, GitHub Actions ile 3 platform için otomatik build.
 - **1.0.0** — İlk sürüm. Temel özellik seti tamam.
 
-## Lisans
+## Yazar ve Lisans
 
-Bu deponun sahibi Rigicon Inc.'e aittir. Dağıtım ve kullanım hakları depo sahibinin takdirindedir.
+Rigicon Live'ı [Quantre34](https://github.com/Quantre34) yazdı ve sürdürüyor.
+
+Yazılım **MIT Lisansı** altında dağıtılıyor — özgürce kullanabilir, değiştirebilir, kendi projelerine dahil edebilirsin. Tek şart: telif hakkı bildirimini dahil et. Tam metin: [LICENSE](LICENSE).
+
+```
+Copyright (c) 2026 Quantre34
+```
+
+**"Rigicon Live" adı hakkında:** Uygulamayı Rigicon Inc.'de çalışan arkadaşlarımla birlikte kullanmam nedeniyle bu isim verilmiştir. Yazarı ve tüm hakları Quantre34'e aittir.
+
+**Kod imzalama sertifikası hakkında:** Windows sertifikası "Rigicon Inc." Subject Name'iyle düzenlenmiştir. Bu, mevcut kurulumların güncelleme sürecini kesintisiz doğrulayabilmesi için sabit tutulan bir build-artifact kimliğidir; yazarlık veya mülkiyet devri anlamına gelmez.
+
+## Katkı
+
+Pull request'ler açık. Küçük düzeltmeler, yeni komutlar, platform testleri, çeviriler — hepsi memnuniyetle karşılanır. Büyük mimari değişiklikler için önce bir issue aç ve tartışalım.
+
+## Bug bildirimi
+
+- Yeni özellik önerisi / bug: [Issues](https://github.com/Quantre34/RigiconLive/issues)
+- Güvenlik zafiyeti: özel olarak [Quantre34](https://github.com/Quantre34) ile iletişime geç, public issue açma

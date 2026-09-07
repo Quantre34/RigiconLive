@@ -19,14 +19,15 @@ BEGIN
     BEGIN
         BLOCK "040904b0"         /* U.S. English, Unicode */
         BEGIN
-            VALUE "CompanyName",      "Rigicon Inc."
+            VALUE "CompanyName",      "Quantre34"
             VALUE "FileDescription",  "Rigicon Live - Encrypted Terminal Messaging"
             VALUE "FileVersion",      "1.0.0.0"
             VALUE "InternalName",     "RigiconLive"
-            VALUE "LegalCopyright",   "Copyright (c) Rigicon Inc."
+            VALUE "LegalCopyright",   "Copyright (c) 2026 Quantre34. Licensed under MIT."
             VALUE "OriginalFilename", "RigiconLive.exe"
             VALUE "ProductName",      "Rigicon Live"
             VALUE "ProductVersion",   "1.0.0.0"
+            VALUE "Comments",         "Kod imzalama sertifikasi 'Rigicon Inc.' adiyla mevcut kurulumlarla uyumluluk icin sabit tutulur. Yazar ve tum haklar: Quantre34."
         END
     END
     BLOCK "VarFileInfo"

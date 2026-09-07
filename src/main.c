@@ -425,7 +425,7 @@ static void print_banner_body(int notify_on) {
     const char *rst  = rgcn_color_reset();
     const char *me   = rgcn_color_for(g_nick);
     printf("%s%s%s\n", gray, "═══════════════════════════════════════════════════════════", rst);
-    printf("  \x1b[1m\x1b[38;5;39mR I G I C O N   L I V E\x1b[0m   %s· Rigicon Inc.%s\n", gray, rst);
+    printf("  \x1b[1m\x1b[38;5;39mR I G I C O N   L I V E\x1b[0m   %s· by Quantre34 *%s\n", gray, rst);
     printf("%s%s%s\n", gray, "═══════════════════════════════════════════════════════════", rst);
     printf("  %sRumuz    :%s %s%s%s\n", gray, rst, me, g_nick, rst);
     printf("  %sKanal    :%s %d\n", gray, rst, g_port);
@@ -433,8 +433,9 @@ static void print_banner_body(int notify_on) {
     printf("  %sŞifreleme:%s ChaCha20-Poly1305 (AEAD, RFC 8439)\n", gray, rst);
     printf("  %sİz       :%s Sıfır. Kapanınca her şey gider.\n", gray, rst);
     printf("%s%s%s\n", gray, "═══════════════════════════════════════════════════════════", rst);
-    printf("  %sKomutlar: /quit /clear /who /status /color /timer /send /accept /reject /help%s\n", gray, rst);
-    printf("%s%s%s\n\n", gray, "───────────────────────────────────────────────────────────", rst);
+    printf("  %sKomutlar: /quit /clear /who /status /color /timer /send /accept /reject /help /about%s\n", gray, rst);
+    printf("%s%s%s\n", gray, "───────────────────────────────────────────────────────────", rst);
+    printf("  %s* uygulama Quantre34'e aittir.  detay: /about%s\n\n", gray, rst);
     fflush(stdout);
 }
 
@@ -1266,7 +1267,19 @@ static void handle_command(const char *cmd) {
         render_system("  /send @rumuz <dosya>    sadece belirli kişiye paylaş");
         render_system("  /accept <dosya-adı>     gelen dosya teklifini kabul et");
         render_system("  /reject <dosya-adı>     gelen dosya teklifini reddet");
+        render_system("  /about                  yazar / lisans / isim notu");
         render_system("  /help                   bu liste");
+    } else if (strcmp(cmd, "/about") == 0) {
+        render_system("Rigicon Live " RGCN_VERSION);
+        render_system("  Yazar          : Quantre34");
+        render_system("  Kaynak         : https://github.com/Quantre34/RigiconLive");
+        render_system("  Lisans         : MIT (LICENSE dosyasına bak)");
+        render_system("  Kod imzalama   : Rigicon Inc. adıyla (mevcut kurulumların");
+        render_system("                   güncellemeleri bozulmasın diye stabil tutuluyor)");
+        render_system("");
+        render_system("* 'Rigicon Live' adı, uygulamayı Rigicon Inc.'de çalışan");
+        render_system("  arkadaşlarımla birlikte kullandığım için verilmiştir.");
+        render_system("  Yazılımın tüm hakları Quantre34'e aittir.");
     }
     /* Unknown "/..." inputs never reach here - filtered by is_known_command()
      * in on_enter() and sent as regular chat instead. */
@@ -1276,7 +1289,7 @@ static int is_known_command(const char *text) {
     /* Multi-word commands: match on the first token only. */
     static const char *known[] = {
         "/quit", "/clear", "/who", "/status", "/help", "/timer",
-        "/color", "/send", "/accept", "/reject", NULL
+        "/color", "/send", "/accept", "/reject", "/about", NULL
     };
     for (int i = 0; known[i]; i++) {
         size_t klen = strlen(known[i]);
