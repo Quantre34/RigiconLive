@@ -19,17 +19,3 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
-
----
-
-Attribution note:
-
-The product name "Rigicon Live" was chosen by the author (Quantre34) at the
-time this software began being used together with colleagues at Rigicon Inc.
-The name reflects that use context; ownership, authorship and all rights to
-the software remain with Quantre34.
-
-The Windows code-signing certificate embedded in the release binaries is
-issued in the "Rigicon Inc." Subject Name. This is a build-artifact identity
-kept stable so existing installations continue to validate updates without
-having to re-trust a new certificate. It does not transfer any rights.
