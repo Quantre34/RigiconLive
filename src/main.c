@@ -42,7 +42,8 @@
 /* Globals                                                                     */
 /* -------------------------------------------------------------------------- */
 
-static volatile int g_running = 1;
+static volatile int g_running        = 1;
+static volatile int g_needs_redraw   = 0;   /* SIGWINCH / other async triggers */
 
 static char       g_nick[RGCN_MAX_NICK];
 static int        g_port    = RGCN_DEFAULT_PORT;
@@ -58,8 +59,11 @@ static uint32_t   g_timer_ms  = 0;   /* /timer session TTL; 0 = off */
  * formatted ANSI string. When a burn expires, we drop its entry from the log
  * and repaint the whole visible area from what's left. This is what gives
  * us actual "silme" without cursor-based overwrite hacks (which corrupted
- * ordering once the terminal scrolled). */
-#define LOG_CAP 512
+ * ordering once the terminal scrolled).
+ *
+ * 4096 entries at ~768 bytes each = ~3 MB. Plenty of headroom for a long
+ * session used as scratch pad without losing early lines to ring wrap. */
+#define LOG_CAP 4096
 struct log_entry {
     char     line[RGCN_MAX_TEXT + 256];
     uint64_t expire_ms;   /* 0 = permanent */
@@ -745,6 +749,13 @@ static RGCN_THREAD_RET receiver_thread(void *arg) {
         /* Every wake-up: check burn expirations (fast, cheap). */
         expire_burns();
 
+        /* Terminal was resized (or some other async trigger): repaint the
+         * log so lines aren't stranded at now-invalid cursor coordinates. */
+        if (g_needs_redraw) {
+            g_needs_redraw = 0;
+            redraw_screen();
+        }
+
         /* Periodic maintenance: expire stale peers + re-announce presence. */
         uint64_t now = rgcn_now_ms();
         if (now - last_heartbeat >= HEARTBEAT_MS) {
@@ -764,7 +775,10 @@ static RGCN_THREAD_RET receiver_thread(void *arg) {
 /* Signal handling                                                             */
 /* -------------------------------------------------------------------------- */
 
-static void on_sigint(int sig) { (void)sig; g_running = 0; }
+static void on_sigint(int sig)   { (void)sig; g_running = 0; }
+#ifdef SIGWINCH
+static void on_sigwinch(int sig) { (void)sig; g_needs_redraw = 1; }
+#endif
 
 #ifdef _WIN32
 static BOOL WINAPI on_ctrl(DWORD kind) {
@@ -909,6 +923,9 @@ static void handle_command(const char *cmd) {
     if (strcmp(cmd, "/quit") == 0) {
         g_running = 0;
     } else if (strcmp(cmd, "/clear") == 0) {
+        render_system("Ekran silinsin mi? Tum sohbet gecmisi RAM'den de silinir.");
+        render_system("Onay: /clear! yaz (tersini yapamiyoruz)");
+    } else if (strcmp(cmd, "/clear!") == 0) {
         reset_screen();
     } else if (strncmp(cmd, "/color", 6) == 0 && (cmd[6] == 0 || cmd[6] == ' ')) {
         const char *arg = cmd + 6;
@@ -1288,7 +1305,7 @@ static void handle_command(const char *cmd) {
 static int is_known_command(const char *text) {
     /* Multi-word commands: match on the first token only. */
     static const char *known[] = {
-        "/quit", "/clear", "/who", "/status", "/help", "/timer",
+        "/quit", "/clear", "/clear!", "/who", "/status", "/help", "/timer",
         "/color", "/send", "/accept", "/reject", "/about", NULL
     };
     for (int i = 0; known[i]; i++) {
@@ -1484,6 +1501,9 @@ int main(int argc, char **argv) {
     }
 
     signal(SIGINT, on_sigint);
+#ifdef SIGWINCH
+    signal(SIGWINCH, on_sigwinch);
+#endif
 #ifdef _WIN32
     SetConsoleCtrlHandler(on_ctrl, TRUE);
 #endif
@@ -1587,9 +1607,9 @@ int main(int argc, char **argv) {
             input_backspace();
             print_prompt_unlocked();
         } else if (n == 1 && buf[0] == 0x0c) {    /* Ctrl+L */
-            rgcn_term_clear_screen();
-            render_banner(g_notify_on);
-            print_prompt_unlocked();
+            /* We already hold term_lock from the top of this iteration -
+             * call the unlocked redraw so we don't try to take it twice. */
+            redraw_from_log_unlocked();
         } else if (n == 1 && buf[0] < 0x20) {
             /* Ignore other control chars. */
         } else {
