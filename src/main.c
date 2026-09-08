@@ -22,6 +22,9 @@
 #include <time.h>
 #include <signal.h>
 #include <sys/stat.h>
+#ifndef _WIN32
+  #include <sys/ioctl.h>
+#endif
 
 #ifndef S_ISREG
   #define S_ISREG(m) (((m) & S_IFMT) == S_IFREG)
@@ -44,6 +47,13 @@
 
 static volatile int g_running        = 1;
 static volatile int g_needs_redraw   = 0;   /* SIGWINCH / other async triggers */
+
+/* Terminal width + how many rows the currently-drawn prompt occupies.
+ * Needed so backspace/repaint clears the whole wrapped prompt block, not
+ * just the last row (that was the "N copies of the prompt marching down"
+ * bug on long input). */
+static int g_term_cols   = 80;
+static int g_prompt_rows = 1;
 
 static char       g_nick[RGCN_MAX_NICK];
 static int        g_port    = RGCN_DEFAULT_PORT;
@@ -274,17 +284,89 @@ static void time_hms(char *out, size_t cap, uint64_t ms) {
     snprintf(out, cap, "%02d:%02d:%02d", tm_.tm_hour, tm_.tm_min, tm_.tm_sec);
 }
 
-static void print_prompt_unlocked(void) {
+/* Query terminal width. Called at init and on SIGWINCH. */
+static void refresh_term_size(void) {
+#ifndef _WIN32
+    struct winsize ws;
+    if (ioctl(0, TIOCGWINSZ, &ws) == 0 && ws.ws_col > 0) g_term_cols = ws.ws_col;
+#else
+    CONSOLE_SCREEN_BUFFER_INFO csbi;
+    HANDLE h = GetStdHandle(STD_OUTPUT_HANDLE);
+    if (h && GetConsoleScreenBufferInfo(h, &csbi)) {
+        int w = csbi.srWindow.Right - csbi.srWindow.Left + 1;
+        if (w > 0) g_term_cols = w;
+    }
+#endif
+    if (g_term_cols < 20) g_term_cols = 80;
+}
+
+/* Count code points in a UTF-8 byte range (approximate visible columns).
+ * Treats each code point as width=1. Wide CJK or emoji will misreport;
+ * good enough for our nick/text which is Latin/Turkish. */
+static int utf8_visible_cols(const char *s, size_t n) {
+    int w = 0;
+    for (size_t i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)s[i];
+        if ((c & 0xC0) != 0x80) w++;
+    }
+    return w;
+}
+
+/* How many visible columns the current prompt+input will use. */
+static int current_prompt_width(void) {
+    int w = 0;
+    if (g_timer_ms > 0) {
+        char tmp[16];
+        int n = snprintf(tmp, sizeof tmp, "[%us] ", g_timer_ms / 1000);
+        if (n > 0) w += n;
+    }
+    w += utf8_visible_cols(g_nick, strlen(g_nick));
+    w += 3;   /* " ▸ " (▸ is one column) */
+    w += utf8_visible_cols(g_input, g_input_len);
+    return w;
+}
+
+/* Recalculate g_prompt_rows from current input width + terminal width. */
+static void recompute_prompt_rows(void) {
+    int w = current_prompt_width();
+    int cols = g_term_cols > 0 ? g_term_cols : 80;
+    int rows = (w / cols) + 1;
+    g_prompt_rows = rows > 0 ? rows : 1;
+}
+
+/* Move cursor to the beginning of the FIRST row of the currently-drawn
+ * prompt, then clear from there to end of screen. After this the prompt
+ * area is fully blank and cursor is at its top-left corner. */
+static void clear_prompt_area_unlocked(void) {
+    if (g_prompt_rows > 1) {
+        printf("\x1b[%dF", g_prompt_rows - 1);   /* cursor to start of Nth previous line */
+    } else {
+        printf("\r");
+    }
+    printf("\x1b[J");
+    g_prompt_rows = 1;
+}
+
+/* Emit the prompt content at the current cursor position. Cursor ends at end
+ * of input. */
+static void emit_prompt_unlocked(void) {
     const char *c = rgcn_color_for(g_nick);
     const char *gray = rgcn_color_gray();
     const char *r = rgcn_color_reset();
-    printf("\r\x1b[K");
     if (g_timer_ms > 0) {
         printf("%s[%us]%s ", gray, g_timer_ms / 1000, r);
     }
     printf("%s%s%s ▸ %s", c, g_nick, gray, r);
     if (g_input_len > 0) fwrite(g_input, 1, g_input_len, stdout);
+    recompute_prompt_rows();
     fflush(stdout);
+}
+
+/* Full re-render of the prompt (clears wrapped remnants, reprints, updates
+ * row count). Used by backspace, timer changes, and after any message. */
+static void print_prompt_unlocked(void) {
+    clear_prompt_area_unlocked();
+    emit_prompt_unlocked();
 }
 
 /* -------------------------------------------------------------------------- */
@@ -325,20 +407,24 @@ static void print_banner_body(int notify_on);
 
 static void redraw_from_log_unlocked(void) {
     printf("\x1b[H\x1b[2J");   /* home + clear entire visible screen */
+    g_prompt_rows = 1;         /* screen just wiped, nothing to clear */
     print_banner_body(g_notify_on);
     for (int i = 0; i < g_log_count; i++) {
         int idx = log_iter_idx(i);
         if (!g_log[idx].alive) continue;
         printf("%s\n", g_log[idx].line);
     }
-    print_prompt_unlocked();
+    emit_prompt_unlocked();
 }
 
 static void write_line(const char *line) {
     rgcn_term_lock();
     log_append(line, 0);
-    printf("\r\x1b[K%s\n", line);
-    print_prompt_unlocked();
+    /* Wipe the whole wrapped prompt block before printing the message so
+     * long prompts don't leave copies stranded above. */
+    clear_prompt_area_unlocked();
+    printf("%s\n", line);
+    emit_prompt_unlocked();
     rgcn_term_unlock();
 }
 
@@ -366,8 +452,9 @@ static void render_burn(const char *nick, const char *text, uint64_t ts,
              rgcn_color_gray(), ttl_ms / 1000, rgcn_color_reset());
     rgcn_term_lock();
     log_append(line, rgcn_now_ms() + ttl_ms);
-    printf("\r\x1b[K%s\n", line);
-    print_prompt_unlocked();
+    clear_prompt_area_unlocked();
+    printf("%s\n", line);
+    emit_prompt_unlocked();
     rgcn_term_unlock();
 }
 
@@ -777,7 +864,11 @@ static RGCN_THREAD_RET receiver_thread(void *arg) {
 
 static void on_sigint(int sig)   { (void)sig; g_running = 0; }
 #ifdef SIGWINCH
-static void on_sigwinch(int sig) { (void)sig; g_needs_redraw = 1; }
+static void on_sigwinch(int sig) {
+    (void)sig;
+    refresh_term_size();      /* async-signal-safe on POSIX (only ioctl) */
+    g_needs_redraw = 1;
+}
 #endif
 
 #ifdef _WIN32
@@ -1509,6 +1600,7 @@ int main(int argc, char **argv) {
 #endif
 
     rgcn_term_init();
+    refresh_term_size();
     render_banner(g_notify_on);
     print_prompt_unlocked();
 
@@ -1619,6 +1711,9 @@ int main(int argc, char **argv) {
                 g_input[g_input_len] = 0;
                 fwrite(buf, 1, n, stdout);
                 fflush(stdout);
+                /* Update wrap tracking so a later backspace or write_line
+                 * clears the entire prompt block, not just the last row. */
+                recompute_prompt_rows();
             }
         }
         rgcn_term_unlock();
