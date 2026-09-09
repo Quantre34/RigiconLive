@@ -167,10 +167,32 @@ static int g_peer_count = 0;
   static int              g_peer_lock_ready = 0;
   #define PEER_LOCK()   do { if (!g_peer_lock_ready) { InitializeCriticalSection(&g_peer_lock); g_peer_lock_ready = 1; } EnterCriticalSection(&g_peer_lock); } while (0)
   #define PEER_UNLOCK() LeaveCriticalSection(&g_peer_lock)
+
+  /* g_net_mtx is recursive so /channel can hold it while calling send_msg. */
+  static CRITICAL_SECTION g_net_mtx;
+  static int              g_net_mtx_ready = 0;
+  #define NET_LOCK()    do { if (!g_net_mtx_ready) { InitializeCriticalSection(&g_net_mtx); g_net_mtx_ready = 1; } EnterCriticalSection(&g_net_mtx); } while (0)
+  #define NET_UNLOCK()  LeaveCriticalSection(&g_net_mtx)
 #else
   static pthread_mutex_t g_peer_lock = PTHREAD_MUTEX_INITIALIZER;
   #define PEER_LOCK()   pthread_mutex_lock(&g_peer_lock)
   #define PEER_UNLOCK() pthread_mutex_unlock(&g_peer_lock)
+
+  /* Recursive so /channel handler can hold this AND call send_msg (which
+   * takes it again) without deadlocking. */
+  static pthread_mutex_t g_net_mtx;
+  static int             g_net_mtx_ready = 0;
+  static void ensure_net_mtx(void) {
+      if (g_net_mtx_ready) return;
+      pthread_mutexattr_t attr;
+      pthread_mutexattr_init(&attr);
+      pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
+      pthread_mutex_init(&g_net_mtx, &attr);
+      pthread_mutexattr_destroy(&attr);
+      g_net_mtx_ready = 1;
+  }
+  #define NET_LOCK()    do { ensure_net_mtx(); pthread_mutex_lock(&g_net_mtx); } while (0)
+  #define NET_UNLOCK()  pthread_mutex_unlock(&g_net_mtx)
 #endif
 
 /* -------------------------------------------------------------------------- */
@@ -524,7 +546,7 @@ static void print_banner_body(int notify_on) {
     printf("  %sŞifreleme:%s ChaCha20-Poly1305 (AEAD, RFC 8439)\n", gray, rst);
     printf("  %sİz       :%s Sıfır. Kapanınca her şey gider.\n", gray, rst);
     printf("%s%s%s\n", gray, "═══════════════════════════════════════════════════════════", rst);
-    printf("  %sKomutlar: /quit /clear /who /status /color /timer /send /accept /reject /help /about%s\n", gray, rst);
+    printf("  %sKomutlar: /quit /clear /who /status /channel /color /timer /send /accept /reject /help /about%s\n", gray, rst);
     printf("%s%s%s\n", gray, "───────────────────────────────────────────────────────────", rst);
     printf("  %s* uygulama Quantre34'e aittir.  detay: /about%s\n\n", gray, rst);
     fflush(stdout);
@@ -583,12 +605,7 @@ static void send_kind_ttl(const char *kind, const char *text, uint32_t ttl_ms) {
     size_t pkt_len = 0;
     if (rgcn_seal((const uint8_t *)plain, (size_t)n, pkt, sizeof pkt, &pkt_len) != 0) return;
 
-    /* Discovery path: multicast + subnet broadcast + limited broadcast.
-     * Unreliable on WiFi (packet loss up to 70%) but reaches new peers. */
-    rgcn_net_broadcast(g_net, pkt, pkt_len);
-
-    /* Reliable path: unicast to every known peer (ACKed at WiFi layer).
-     * Snapshot under lock, send unlocked (no network I/O while holding lock). */
+    /* Snapshot peer set under peer lock (not net lock). */
     struct { uint32_t ip; uint16_t port; } snap[PEERS_CAP];
     int snap_n = 0;
     uint64_t now = rgcn_now_ms();
@@ -601,8 +618,15 @@ static void send_kind_ttl(const char *kind, const char *text, uint32_t ttl_ms) {
         snap_n++;
     }
     PEER_UNLOCK();
+
+    /* Net lock protects g_net swap during /channel. Recursive so we can call
+     * this from inside the /channel handler which also holds the lock. */
+    /* g_net pointer is written atomically during /channel; capture once. */
+    rgcn_net_t *net = g_net;
+    if (!net) return;
+    rgcn_net_broadcast(net, pkt, pkt_len);
     for (int i = 0; i < snap_n; i++) {
-        rgcn_net_unicast(g_net, snap[i].ip, snap[i].port, pkt, pkt_len);
+        rgcn_net_unicast(net, snap[i].ip, snap[i].port, pkt, pkt_len);
     }
 }
 
@@ -617,7 +641,6 @@ static void send_raw_plaintext(const char *plain, size_t n) {
     uint8_t pkt[RGCN_MAX_PACKET];
     size_t pkt_len = 0;
     if (rgcn_seal((const uint8_t *)plain, n, pkt, sizeof pkt, &pkt_len) != 0) return;
-    rgcn_net_broadcast(g_net, pkt, pkt_len);
 
     struct { uint32_t ip; uint16_t port; } snap[PEERS_CAP];
     int snap_n = 0;
@@ -631,8 +654,12 @@ static void send_raw_plaintext(const char *plain, size_t n) {
         snap_n++;
     }
     PEER_UNLOCK();
+
+    rgcn_net_t *net = g_net;
+    if (!net) return;
+    rgcn_net_broadcast(net, pkt, pkt_len);
     for (int i = 0; i < snap_n; i++)
-        rgcn_net_unicast(g_net, snap[i].ip, snap[i].port, pkt, pkt_len);
+        rgcn_net_unicast(net, snap[i].ip, snap[i].port, pkt, pkt_len);
 }
 
 static char *split(char **s) {
@@ -826,7 +853,12 @@ static RGCN_THREAD_RET receiver_thread(void *arg) {
     while (g_running) {
         uint32_t from_ip = 0;
         uint16_t from_port = 0;
-        int r = rgcn_net_recv(g_net, pkt, sizeof pkt, 500, &from_ip, &from_port);
+        /* Snapshot g_net once per iteration; /channel may swap the pointer
+         * mid-flight but the old net_t stays alive for ~200ms after swap so
+         * this dereference is safe. */
+        rgcn_net_t *net = g_net;
+        if (!net) { break; }
+        int r = rgcn_net_recv(net, pkt, sizeof pkt, 100, &from_ip, &from_port);
         if (r > 0) {
             size_t plain_len = 0;
             if (rgcn_open(pkt, (size_t)r, plain, sizeof plain, &plain_len) == 0)
@@ -1061,6 +1093,84 @@ static void handle_command(const char *cmd) {
                 render_system(buf);
             }
         }
+    } else if (strncmp(cmd, "/channel", 8) == 0 && (cmd[8] == 0 || cmd[8] == ' ')) {
+        const char *arg = cmd + 8;
+        while (*arg == ' ') arg++;
+        if (!*arg) {
+            char b[80];
+            snprintf(b, sizeof b, "Simdiki kanal: %d.  Kullanim: /channel <1024-65535>", g_port);
+            render_system(b);
+            return;
+        }
+        char *end = NULL;
+        long v = strtol(arg, &end, 10);
+        if (end == arg || v < RGCN_MIN_PORT || v > RGCN_MAX_PORT) {
+            char b[80];
+            snprintf(b, sizeof b, "Gecersiz port. Aralik: %d-%d", RGCN_MIN_PORT, RGCN_MAX_PORT);
+            render_system(b);
+            return;
+        }
+        if ((int)v == g_port) {
+            render_system("Zaten bu kanaldasin, degisiklik yok.");
+            return;
+        }
+        int new_port = (int)v;
+
+        /* Open new socket FIRST so a failure leaves the old channel intact. */
+        char err[256];
+        rgcn_net_t *new_net = rgcn_net_open(new_port, err, sizeof err);
+        if (!new_net) {
+            char b[320];
+            snprintf(b, sizeof b, "Kanal %d acilamadi: %s", new_port, err);
+            render_system(b);
+            return;
+        }
+
+        /* LEAVE on OLD - uses current peer snapshot so unicast copies land. */
+        send_msg("LEAVE", NULL);
+
+        /* Atomic pointer swap. Receiver thread reads g_net once per iteration
+         * into a local, so a brief usleep after the swap guarantees no thread
+         * still holds a stale pointer when we free the old net_t. */
+        int old_port = g_port;
+        rgcn_net_t *old_net = g_net;
+        g_net  = new_net;
+        g_port = new_port;
+#ifdef _WIN32
+        Sleep(200);
+#else
+        usleep(200 * 1000);
+#endif
+        rgcn_net_close(old_net);
+
+        /* Cancel any in-flight file offers - the TCP port we advertised was
+         * announced on the OLD channel; peers on the new one don't know it,
+         * and peers on the old one can no longer reach us for CONFIRM. */
+#ifdef _WIN32
+        for (int i = 0; i < g_sent_offer_count; i++)
+            closesocket(g_sent_offers[i].listen_socket);
+#else
+        for (int i = 0; i < g_sent_offer_count; i++)
+            close(g_sent_offers[i].listen_socket);
+#endif
+        g_sent_offer_count = 0;
+        g_offer_count      = 0;
+
+        /* Peers are channel-specific. Start fresh on the new channel. */
+        PEER_LOCK();
+        g_peer_count = 0;
+        PEER_UNLOCK();
+
+        /* Announce ourselves on the new channel. */
+        send_msg("JOIN", NULL);
+
+        char b[128];
+        snprintf(b, sizeof b, "Kanal %d'den %d'e gecildi. Yeni sohbet baslatiliyor.",
+                 old_port, new_port);
+        render_system(b);
+
+        /* Banner shows g_port - trigger a redraw so it reflects the new value. */
+        redraw_screen();
     } else if (strncmp(cmd, "/timer", 6) == 0) {
         const char *arg = cmd + 6;
         while (*arg == ' ') arg++;
@@ -1366,6 +1476,7 @@ static void handle_command(const char *cmd) {
         render_system("  /clear                  ekranı temizle");
         render_system("  /who                    kanaldakileri listele");
         render_system("  /status                 bağlantı durumu / peer IP'leri");
+        render_system("  /channel <port>         kanal değiştir (çıkmadan başka porta geç)");
         render_system("  /color                  rengini seç (paleti gösterir)");
         render_system("  /color 5                paletten 5 numaralı rengi seç");
         render_system("  /color auto             otomatik ata (varsayılan)");
@@ -1397,7 +1508,7 @@ static int is_known_command(const char *text) {
     /* Multi-word commands: match on the first token only. */
     static const char *known[] = {
         "/quit", "/clear", "/clear!", "/who", "/status", "/help", "/timer",
-        "/color", "/send", "/accept", "/reject", "/about", NULL
+        "/color", "/send", "/accept", "/reject", "/about", "/channel", NULL
     };
     for (int i = 0; known[i]; i++) {
         size_t klen = strlen(known[i]);
@@ -1554,6 +1665,18 @@ int main(int argc, char **argv) {
 #ifndef _WIN32
     signal(SIGPIPE, SIG_IGN);
     signal(SIGCHLD, SIG_IGN);   /* auto-reap notify helpers */
+    /* Init recursive net mutex ONCE up front. Lazy init from NET_LOCK is
+     * racy: main + receiver thread can both see g_net_mtx_ready==0 and
+     * both call pthread_mutex_init, second init resets attrs to
+     * non-recursive on macOS and the /channel handler deadlocks. */
+    {
+        pthread_mutexattr_t attr;
+        pthread_mutexattr_init(&attr);
+        pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
+        pthread_mutex_init(&g_net_mtx, &attr);
+        pthread_mutexattr_destroy(&attr);
+        g_net_mtx_ready = 1;
+    }
 #endif
 
     /* Verify our AEAD implementation before touching the network. */
