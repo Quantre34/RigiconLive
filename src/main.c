@@ -15,6 +15,7 @@
 #include "notify.h"
 #include "file.h"
 #include "game.h"
+#include "poll.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -578,7 +579,7 @@ static void print_banner_body(int notify_on) {
     printf("  %sŞifreleme:%s ChaCha20-Poly1305 (AEAD, RFC 8439)\n", gray, rst);
     printf("  %sİz       :%s Sıfır. Kapanınca her şey gider.\n", gray, rst);
     printf("%s%s%s\n", gray, "═══════════════════════════════════════════════════════════", rst);
-    printf("  %sKomutlar: /quit /clear /who /status /channel /color /timer /send /accept /reject /game /help /about%s\n", gray, rst);
+    printf("  %sKomutlar: /quit /clear /who /status /channel /color /timer /send /accept /reject /game /poll /vote /help /about%s\n", gray, rst);
     printf("%s%s%s\n", gray, "───────────────────────────────────────────────────────────", rst);
     printf("  %s* uygulama Quantre34'e aittir.  detay: /about%s\n\n", gray, rst);
     fflush(stdout);
@@ -947,6 +948,44 @@ static void handle_decoded(const char *raw, size_t raw_len,
         char *offer_id_s = p;
         if (!offer_id_s) return;
         rgcn_game_on_resign(strtoull(offer_id_s, NULL, 16));
+    } else if (strcmp(kind, "POLL_OPEN") == 0) {
+        /* POLL_OPEN|station|id|ts|creator_nick|poll_id_hex|duration_s|n|question|opt1|...|optN */
+        char *poll_id_s = split(&p);
+        char *dur_s     = split(&p);
+        char *n_s       = split(&p);
+        char *question  = split(&p);
+        if (!poll_id_s || !dur_s || !n_s || !question) return;
+        int n = atoi(n_s);
+        if (n < 2 || n > 9) return;
+        const char *opts[9];
+        int ok = 1;
+        for (int i = 0; i < n; i++) {
+            char *o = (i == n - 1) ? p : split(&p);
+            if (!o) { ok = 0; break; }
+            opts[i] = o;
+        }
+        if (!ok) return;
+        rgcn_poll_on_open(nick, strtoull(poll_id_s, NULL, 16), atoi(dur_s), question, opts, n);
+    } else if (strcmp(kind, "POLL_VOTE") == 0) {
+        char *poll_id_s = split(&p);
+        char *idx_s     = p;
+        if (!poll_id_s || !idx_s) return;
+        rgcn_poll_on_vote(nick, strtoull(poll_id_s, NULL, 16), atoi(idx_s));
+    } else if (strcmp(kind, "POLL_CLOSE") == 0) {
+        char *poll_id_s = split(&p);
+        char *n_s       = split(&p);
+        if (!poll_id_s || !n_s) return;
+        int n = atoi(n_s);
+        if (n < 0 || n > 9) return;
+        int counts[9];
+        int ok = 1;
+        for (int i = 0; i < n; i++) {
+            char *c = (i == n - 1) ? p : split(&p);
+            if (!c) { ok = 0; break; }
+            counts[i] = atoi(c);
+        }
+        if (!ok) return;
+        rgcn_poll_on_close(nick, strtoull(poll_id_s, NULL, 16), counts, n);
     }
 }
 
@@ -983,6 +1022,7 @@ static RGCN_THREAD_RET receiver_thread(void *arg) {
 
         /* Every wake-up: check burn expirations (fast, cheap). */
         expire_burns();
+        rgcn_poll_tick();
 
         /* Terminal was resized (or some other async trigger): repaint the
          * log so lines aren't stranded at now-invalid cursor coordinates.
@@ -1609,6 +1649,10 @@ static void handle_command(const char *cmd) {
         render_system("  /game pong              bilgisayara karşı Pong oyna");
         render_system("  /game xox <rumuz>       birine XOX (tic-tac-toe) daveti gönder");
         render_system("  /game accept|reject     gelen oyun davetine yanıt ver");
+        render_system("  /poll \"Soru\" \"A\" \"B\"   anket aç (en az 2, en çok 9 seçenek)");
+        render_system("  /vote <numara>          aktif ankette oy ver");
+        render_system("  /poll                   aktif anketin durumunu göster");
+        render_system("  /poll end               açtığın anketi erken bitir");
         render_system("  /about                  yazar / lisans / isim notu");
         render_system("  /help                   bu liste");
     } else if (strcmp(cmd, "/about") == 0) {
@@ -1624,6 +1668,10 @@ static void handle_command(const char *cmd) {
         render_system("  Yazılımın tüm hakları Quantre34'e aittir.");
     } else if (strncmp(cmd, "/game", 5) == 0 && (cmd[5] == 0 || cmd[5] == ' ')) {
         rgcn_game_cmd(cmd + 5);
+    } else if (strncmp(cmd, "/poll", 5) == 0 && (cmd[5] == 0 || cmd[5] == ' ')) {
+        rgcn_poll_cmd(cmd + 5);
+    } else if (strncmp(cmd, "/vote", 5) == 0 && (cmd[5] == 0 || cmd[5] == ' ')) {
+        rgcn_vote_cmd(cmd + 5);
     }
     /* Unknown "/..." inputs never reach here - filtered by is_known_command()
      * in on_enter() and sent as regular chat instead. */
@@ -1633,7 +1681,8 @@ static int is_known_command(const char *text) {
     /* Multi-word commands: match on the first token only. */
     static const char *known[] = {
         "/quit", "/clear", "/clear!", "/who", "/status", "/help", "/timer",
-        "/color", "/send", "/accept", "/reject", "/about", "/channel", "/game", NULL
+        "/color", "/send", "/accept", "/reject", "/about", "/channel", "/game",
+        "/poll", "/vote", NULL
     };
     for (int i = 0; known[i]; i++) {
         size_t klen = strlen(known[i]);
