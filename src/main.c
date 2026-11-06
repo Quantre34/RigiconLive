@@ -14,6 +14,7 @@
 #include "term.h"
 #include "notify.h"
 #include "file.h"
+#include "game.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -53,7 +54,14 @@ static volatile int g_needs_redraw   = 0;   /* SIGWINCH / other async triggers *
  * just the last row (that was the "N copies of the prompt marching down"
  * bug on long input). */
 static int g_term_cols   = 80;
+static int g_term_rows   = 24;
 static int g_prompt_rows = 1;
+
+/* Set by write_line()/render_burn() when they append to the log while a
+ * /game split-screen is active (so they skip the normal direct-print path).
+ * The active game's frame sync consumes this to know when to repaint the
+ * chat strip. Only ever touched while rgcn_game_is_active(). */
+static volatile int g_chat_dirty = 0;
 
 static char       g_nick[RGCN_MAX_NICK];
 static int        g_port    = RGCN_DEFAULT_PORT;
@@ -306,20 +314,30 @@ static void time_hms(char *out, size_t cap, uint64_t ms) {
     snprintf(out, cap, "%02d:%02d:%02d", tm_.tm_hour, tm_.tm_min, tm_.tm_sec);
 }
 
-/* Query terminal width. Called at init and on SIGWINCH. */
+/* Query terminal width/height. Called at init and on SIGWINCH. Height is
+ * only used by the /game split-screen layout - normal chat scrolls freely
+ * and never needed a row count before this. */
 static void refresh_term_size(void) {
 #ifndef _WIN32
     struct winsize ws;
-    if (ioctl(0, TIOCGWINSZ, &ws) == 0 && ws.ws_col > 0) g_term_cols = ws.ws_col;
+    if (ioctl(0, TIOCGWINSZ, &ws) == 0) {
+        if (ws.ws_col > 0) g_term_cols = ws.ws_col;
+        if (ws.ws_row > 0) g_term_rows = ws.ws_row;
+    }
 #else
     CONSOLE_SCREEN_BUFFER_INFO csbi;
     HANDLE h = GetStdHandle(STD_OUTPUT_HANDLE);
     if (h && GetConsoleScreenBufferInfo(h, &csbi)) {
         int w = csbi.srWindow.Right - csbi.srWindow.Left + 1;
+        int r = csbi.srWindow.Bottom - csbi.srWindow.Top + 1;
         if (w > 0) g_term_cols = w;
+        if (r > 0) g_term_rows = r;
     }
 #endif
-    if (g_term_cols < 20) g_term_cols = 80;
+    if (g_term_cols < 20)  g_term_cols = 80;
+    if (g_term_cols > 300) g_term_cols = 300;
+    if (g_term_rows < 10)  g_term_rows = 24;
+    if (g_term_rows > 200) g_term_rows = 200;
 }
 
 /* Count code points in a UTF-8 byte range (approximate visible columns).
@@ -442,11 +460,18 @@ static void redraw_from_log_unlocked(void) {
 static void write_line(const char *line) {
     rgcn_term_lock();
     log_append(line, 0);
-    /* Wipe the whole wrapped prompt block before printing the message so
-     * long prompts don't leave copies stranded above. */
-    clear_prompt_area_unlocked();
-    printf("%s\n", line);
-    emit_prompt_unlocked();
+    if (rgcn_game_is_active()) {
+        /* A /game split-screen owns the terminal - don't print into its
+         * board region. Its frame sync repaints the chat strip from the
+         * log once it notices g_chat_dirty. */
+        g_chat_dirty = 1;
+    } else {
+        /* Wipe the whole wrapped prompt block before printing the message so
+         * long prompts don't leave copies stranded above. */
+        clear_prompt_area_unlocked();
+        printf("%s\n", line);
+        emit_prompt_unlocked();
+    }
     rgcn_term_unlock();
 }
 
@@ -474,9 +499,13 @@ static void render_burn(const char *nick, const char *text, uint64_t ts,
              rgcn_color_gray(), ttl_ms / 1000, rgcn_color_reset());
     rgcn_term_lock();
     log_append(line, rgcn_now_ms() + ttl_ms);
-    clear_prompt_area_unlocked();
-    printf("%s\n", line);
-    emit_prompt_unlocked();
+    if (rgcn_game_is_active()) {
+        g_chat_dirty = 1;
+    } else {
+        clear_prompt_area_unlocked();
+        printf("%s\n", line);
+        emit_prompt_unlocked();
+    }
     rgcn_term_unlock();
 }
 
@@ -498,7 +527,10 @@ static void expire_burns(void) {
             removed++;
         }
     }
-    if (removed) redraw_from_log_unlocked();
+    if (removed) {
+        if (rgcn_game_is_active()) g_chat_dirty = 1;
+        else                       redraw_from_log_unlocked();
+    }
     rgcn_term_unlock();
 }
 
@@ -546,7 +578,7 @@ static void print_banner_body(int notify_on) {
     printf("  %sŞifreleme:%s ChaCha20-Poly1305 (AEAD, RFC 8439)\n", gray, rst);
     printf("  %sİz       :%s Sıfır. Kapanınca her şey gider.\n", gray, rst);
     printf("%s%s%s\n", gray, "═══════════════════════════════════════════════════════════", rst);
-    printf("  %sKomutlar: /quit /clear /who /status /channel /color /timer /send /accept /reject /help /about%s\n", gray, rst);
+    printf("  %sKomutlar: /quit /clear /who /status /channel /color /timer /send /accept /reject /game /help /about%s\n", gray, rst);
     printf("%s%s%s\n", gray, "───────────────────────────────────────────────────────────", rst);
     printf("  %s* uygulama Quantre34'e aittir.  detay: /about%s\n\n", gray, rst);
     fflush(stdout);
@@ -633,6 +665,63 @@ static void send_kind_ttl(const char *kind, const char *text, uint32_t ttl_ms) {
 /* Convenience wrapper - existing call sites don't use timer. */
 static void send_msg(const char *kind, const char *text) {
     send_kind_ttl(kind, text, 0);
+}
+
+/* -------------------------------------------------------------------------- */
+/* Bridges for src/game.c (see game.h) - deliberately thin: game.c never     */
+/* touches g_log/g_peers/g_net directly, it only sees these.                 */
+/* -------------------------------------------------------------------------- */
+
+void rgcn_main_system(const char *text) { render_system(text); }
+void rgcn_main_send(const char *kind, const char *text) { send_msg(kind, text); }
+void rgcn_main_chat_send(const char *text) {
+    uint64_t ts = rgcn_now_ms();
+    send_msg("CHAT", text);
+    render_chat(g_nick, text, ts);
+}
+const char *rgcn_main_nick(void) { return g_nick; }
+void rgcn_main_redraw(void) { redraw_screen(); }
+
+int rgcn_main_needs_redraw_consume(void) {
+    if (g_needs_redraw) {
+        g_needs_redraw = 0;
+        refresh_term_size();
+        return 1;
+    }
+    return 0;
+}
+
+void rgcn_main_term_size(int *out_cols, int *out_rows) {
+    if (out_cols) *out_cols = g_term_cols;
+    if (out_rows) *out_rows = g_term_rows;
+}
+
+int rgcn_main_chat_dirty_consume(void) {
+    if (g_chat_dirty) { g_chat_dirty = 0; return 1; }
+    return 0;
+}
+
+void rgcn_main_draw_chat_strip(int top_row, int rows) {
+    if (rows <= 0) return;
+    if (rows > 64) rows = 64;
+    int idxs[64];
+    int count = 0;
+
+    rgcn_term_lock();
+    for (int i = g_log_count - 1; i >= 0 && count < rows; i--) {
+        int idx = log_iter_idx(i);
+        if (!g_log[idx].alive) continue;
+        idxs[count++] = idx;
+    }
+    /* idxs[0] = most recent alive entry. Bottom row of the strip shows the
+     * most recent message; blank rows (not enough history yet) go on top. */
+    for (int r = 0; r < rows; r++) {
+        int rank_from_bottom = rows - 1 - r;
+        printf("\x1b[%d;1H\x1b[K", top_row + r);
+        if (rank_from_bottom < count) printf("%s", g_log[idxs[rank_from_bottom]].line);
+    }
+    fflush(stdout);
+    rgcn_term_unlock();
 }
 
 /* Broadcast a raw pre-formed plaintext message (for FILE_* messages that don't
@@ -831,6 +920,33 @@ static void handle_decoded(const char *raw, size_t raw_len,
         char line[128];
         snprintf(line, sizeof line, "%s kanaldan ayrıldı", nick);
         render_system(line);
+    } else if (strcmp(kind, "GAME_OFFER") == 0) {
+        /* GAME_OFFER|station|id|ts|from_nick|offer_id_hex|game_name|target_nick */
+        char *offer_id_s = split(&p);
+        char *game_name  = split(&p);
+        char *target     = p;   /* remainder, possibly empty */
+        if (!offer_id_s || !game_name) return;
+        if (target && *target && strcmp(target, g_nick) != 0) return;
+        rgcn_game_on_offer(nick, strtoull(offer_id_s, NULL, 16), game_name);
+    } else if (strcmp(kind, "GAME_ACCEPT") == 0) {
+        char *offer_id_s = p;
+        if (!offer_id_s) return;
+        rgcn_game_on_accept(nick, strtoull(offer_id_s, NULL, 16));
+    } else if (strcmp(kind, "GAME_REJECT") == 0) {
+        char *offer_id_s = p;
+        if (!offer_id_s) return;
+        rgcn_game_on_reject(nick, strtoull(offer_id_s, NULL, 16));
+    } else if (strcmp(kind, "GAME_MOVE") == 0) {
+        /* GAME_MOVE|station|id|ts|nick|offer_id_hex|turn_no|board */
+        char *offer_id_s = split(&p);
+        char *turn_s     = split(&p);
+        char *board      = p;
+        if (!offer_id_s || !turn_s || !board) return;
+        rgcn_game_on_move(strtoull(offer_id_s, NULL, 16), strtoull(turn_s, NULL, 10), board);
+    } else if (strcmp(kind, "GAME_RESIGN") == 0) {
+        char *offer_id_s = p;
+        if (!offer_id_s) return;
+        rgcn_game_on_resign(strtoull(offer_id_s, NULL, 16));
     }
 }
 
@@ -869,8 +985,11 @@ static RGCN_THREAD_RET receiver_thread(void *arg) {
         expire_burns();
 
         /* Terminal was resized (or some other async trigger): repaint the
-         * log so lines aren't stranded at now-invalid cursor coordinates. */
-        if (g_needs_redraw) {
+         * log so lines aren't stranded at now-invalid cursor coordinates.
+         * While a /game split-screen is active, leave the flag set - the
+         * game's own frame sync consumes it and re-lays-out both regions;
+         * our chat redraw would stomp the board. */
+        if (g_needs_redraw && !rgcn_game_is_active()) {
             g_needs_redraw = 0;
             redraw_screen();
         }
@@ -1486,6 +1605,10 @@ static void handle_command(const char *cmd) {
         render_system("  /send @rumuz <dosya>    sadece belirli kişiye paylaş");
         render_system("  /accept <dosya-adı>     gelen dosya teklifini kabul et");
         render_system("  /reject <dosya-adı>     gelen dosya teklifini reddet");
+        render_system("  /game tetris            tek kişilik Tetris oyna");
+        render_system("  /game pong              bilgisayara karşı Pong oyna");
+        render_system("  /game xox <rumuz>       birine XOX (tic-tac-toe) daveti gönder");
+        render_system("  /game accept|reject     gelen oyun davetine yanıt ver");
         render_system("  /about                  yazar / lisans / isim notu");
         render_system("  /help                   bu liste");
     } else if (strcmp(cmd, "/about") == 0) {
@@ -1499,6 +1622,8 @@ static void handle_command(const char *cmd) {
         render_system("* 'Rigicon Live' adı, uygulamayı Rigicon Inc.'de çalışan");
         render_system("  arkadaşlarımla birlikte kullandığım için verilmiştir.");
         render_system("  Yazılımın tüm hakları Quantre34'e aittir.");
+    } else if (strncmp(cmd, "/game", 5) == 0 && (cmd[5] == 0 || cmd[5] == ' ')) {
+        rgcn_game_cmd(cmd + 5);
     }
     /* Unknown "/..." inputs never reach here - filtered by is_known_command()
      * in on_enter() and sent as regular chat instead. */
@@ -1508,7 +1633,7 @@ static int is_known_command(const char *text) {
     /* Multi-word commands: match on the first token only. */
     static const char *known[] = {
         "/quit", "/clear", "/clear!", "/who", "/status", "/help", "/timer",
-        "/color", "/send", "/accept", "/reject", "/about", "/channel", NULL
+        "/color", "/send", "/accept", "/reject", "/about", "/channel", "/game", NULL
     };
     for (int i = 0; known[i]; i++) {
         size_t klen = strlen(known[i]);

@@ -11,6 +11,13 @@ void rgcn_term_restore(void);
  * (1..4) or 0 on EOF/interrupt. Blocking. */
 int  rgcn_term_read_char(uint8_t *buf, size_t buf_cap);
 
+/* Same as rgcn_term_read_char but gives up after timeout_ms with no input,
+ * returning 0 - lets a caller's loop advance a tick (gravity, AI, redraw)
+ * with no key pressed. Callers that need to tell "timed out" apart from
+ * "stream closed" should check their own running flag, same as the main
+ * loop does with g_running. */
+int  rgcn_term_read_char_timeout(uint8_t *buf, size_t buf_cap, int timeout_ms);
+
 /* Print helpers - thread-safe wrt each other. */
 void rgcn_term_lock(void);
 void rgcn_term_unlock(void);
@@ -32,5 +39,11 @@ const char *rgcn_color_name(int idx);
 void rgcn_term_clear_screen(void);
 void rgcn_term_clear_current_line(void);
 void rgcn_term_show_cursor(int on);
+
+/* DECAWM auto-wrap. Off while a split-screen game owns the terminal, so a
+ * log/board line wider than the terminal clips instead of wrapping into
+ * the next region. Must be turned back on before returning to chat, which
+ * relies on normal wrap for long input/messages. */
+void rgcn_term_set_autowrap(int on);
 
 #endif

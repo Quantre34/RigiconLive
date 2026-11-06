@@ -22,6 +22,7 @@
   #include <termios.h>
   #include <unistd.h>
   #include <pthread.h>
+  #include <sys/select.h>
   static struct termios g_saved_termios;
   static int g_termios_saved = 0;
   static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -248,6 +249,26 @@ int rgcn_term_read_char(uint8_t *buf, size_t buf_cap) {
 #endif
 }
 
+int rgcn_term_read_char_timeout(uint8_t *buf, size_t buf_cap, int timeout_ms) {
+    if (buf_cap == 0) return 0;
+#ifdef _WIN32
+    DWORD w = WaitForSingleObject(g_hin, timeout_ms < 0 ? INFINITE : (DWORD)timeout_ms);
+    if (w != WAIT_OBJECT_0) return 0;   /* timeout, or handle gone */
+    return rgcn_term_read_char(buf, buf_cap);
+#else
+    fd_set rfds;
+    FD_ZERO(&rfds);
+    FD_SET(0, &rfds);
+    struct timeval tv;
+    tv.tv_sec  = timeout_ms / 1000;
+    tv.tv_usec = (timeout_ms % 1000) * 1000;
+    int r = select(1, &rfds, NULL, NULL, &tv);
+    if (r <= 0) return 0;   /* timeout, signal interrupt, or error */
+    return rgcn_term_read_char(buf, buf_cap);
+#endif
+}
+
 void rgcn_term_clear_screen(void)      { printf("\x1b[2J\x1b[H"); fflush(stdout); }
 void rgcn_term_clear_current_line(void){ printf("\r\x1b[K");     fflush(stdout); }
 void rgcn_term_show_cursor(int on)     { printf(on ? "\x1b[?25h" : "\x1b[?25l"); fflush(stdout); }
+void rgcn_term_set_autowrap(int on)    { printf(on ? "\x1b[?7h"  : "\x1b[?7l");  fflush(stdout); }
