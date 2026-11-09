@@ -74,6 +74,11 @@ static rgcn_net_t *g_net = NULL;
 
 static char       g_input[RGCN_MAX_TEXT];
 static size_t     g_input_len = 0;
+static size_t     g_input_pos = 0;   /* cursor byte offset into g_input, <= g_input_len */
+static int        g_cursor_row = 0;  /* which row (0-indexed) of the wrapped prompt block
+                                       * the cursor is currently on - set by emit_prompt_unlocked(),
+                                       * read by clear_prompt_area_unlocked(). Used to be implicitly
+                                       * "always the last row" before arrow-key editing existed. */
 static int        g_notify_on = 0;
 static uint32_t   g_timer_ms  = 0;   /* /timer session TTL; 0 = off */
 
@@ -395,29 +400,73 @@ static void recompute_prompt_rows(void) {
 
 /* Move cursor to the beginning of the FIRST row of the currently-drawn
  * prompt, then clear from there to end of screen. After this the prompt
- * area is fully blank and cursor is at its top-left corner. */
+ * area is fully blank and cursor is at its top-left corner.
+ *
+ * Moves up by g_cursor_row, NOT g_prompt_rows - 1: before arrow-key
+ * editing existed the cursor was always on the prompt's last row, so
+ * those were the same number. Now the cursor can sit on an earlier
+ * wrapped row (Left-arrow), and moving up by the wrong count either
+ * overshoots into the chat log and erases it, or undershoots and leaves
+ * a stray row behind - this is the exact class of bug 1.3.4 fixed, just
+ * for a cursor position that can now be anywhere, not just the end. */
 static void clear_prompt_area_unlocked(void) {
-    if (g_prompt_rows > 1) {
-        printf("\x1b[%dF", g_prompt_rows - 1);   /* cursor to start of Nth previous line */
+    if (g_cursor_row > 0) {
+        printf("\x1b[%dF", g_cursor_row);   /* cursor to start of Nth previous line */
     } else {
         printf("\r");
     }
     printf("\x1b[J");
     g_prompt_rows = 1;
+    g_cursor_row  = 0;
 }
 
-/* Emit the prompt content at the current cursor position. Cursor ends at end
- * of input. */
+/* Emit the prompt content at the current cursor position, then move the
+ * physical cursor back to g_input_pos if that isn't the end of input
+ * (Left-arrow parked it mid-line). Deliberately NOT a plain "\x1b[nD" -
+ * Cursor Back does not un-wrap across a soft-wrapped row boundary (that
+ * was tried and breaks: CUB clamps at column 1 of the row it's already
+ * on instead of climbing to the previous row, so clear_prompt_area_
+ * unlocked() under-reaches on the next call and stale rows accumulate
+ * with every keystroke). Crossing rows is done with Cursor Previous
+ * Line (which also resets to column 1) plus Cursor Forward within the
+ * target row only - the same "absolute positioning, not relative
+ * guesswork" discipline the rest of this file's rendering follows.
+ * Also records which row the cursor ends up on, in g_cursor_row, for
+ * clear_prompt_area_unlocked() to use next time. */
 static void emit_prompt_unlocked(void) {
     const char *c = rgcn_color_for(g_nick);
     const char *gray = rgcn_color_gray();
     const char *r = rgcn_color_reset();
+    int prefix_w = 0;
     if (g_timer_ms > 0) {
+        char tmp[16];
+        int tn = snprintf(tmp, sizeof tmp, "[%us] ", g_timer_ms / 1000);
+        if (tn > 0) prefix_w += tn;
         printf("%s[%us]%s ", gray, g_timer_ms / 1000, r);
     }
     printf("%s%s%s ▸ %s", c, g_nick, gray, r);
+    prefix_w += utf8_visible_cols(g_nick, strlen(g_nick)) + 3;   /* +3 = " ▸ " */
     if (g_input_len > 0) fwrite(g_input, 1, g_input_len, stdout);
     recompute_prompt_rows();
+
+    int cols = g_term_cols > 0 ? g_term_cols : 80;
+    int total_cols  = prefix_w + utf8_visible_cols(g_input, g_input_len);
+    int target_cols = prefix_w + utf8_visible_cols(g_input, g_input_pos);
+    int end_row    = total_cols  / cols, end_col    = total_cols  % cols;
+    int target_row = target_cols / cols, target_col = target_cols % cols;
+
+    int rows_up = end_row - target_row;
+    if (rows_up > 0) {
+        printf("\x1b[%dF", rows_up);                 /* up N rows, to column 1 */
+        if (target_col > 0) printf("\x1b[%dC", target_col);
+    } else if (end_col > target_col) {
+        printf("\x1b[%dD", end_col - target_col);     /* same row - plain back is fine */
+    }
+
+    g_cursor_row = target_row;
+    if (g_cursor_row > g_prompt_rows - 1) g_cursor_row = g_prompt_rows - 1;
+    if (g_cursor_row < 0) g_cursor_row = 0;
+
     fflush(stdout);
 }
 
@@ -1182,9 +1231,17 @@ static BOOL WINAPI on_ctrl(DWORD kind) {
 /* Line editing                                                                */
 /* -------------------------------------------------------------------------- */
 
+/* Deletes the UTF-8 character immediately before the cursor (g_input_pos),
+ * not necessarily the last character in the buffer. */
 static void input_backspace(void) {
-    while (g_input_len > 0 && (g_input[g_input_len - 1] & 0xC0) == 0x80) g_input_len--;
-    if (g_input_len > 0) g_input_len--;
+    if (g_input_pos == 0) return;
+    size_t start = g_input_pos;
+    while (start > 0 && ((unsigned char)g_input[start - 1] & 0xC0) == 0x80) start--;
+    if (start > 0) start--;
+    size_t del = g_input_pos - start;
+    memmove(g_input + start, g_input + g_input_pos, g_input_len - g_input_pos);
+    g_input_len -= del;
+    g_input_pos  = start;
     g_input[g_input_len] = 0;
 }
 
@@ -1390,8 +1447,10 @@ static void handle_command(const char *cmd) {
             } else {
                 size_t elen = strlen(EMOJI_LIB[v]);
                 if (g_input_len + elen < sizeof g_input) {
-                    memcpy(g_input + g_input_len, EMOJI_LIB[v], elen);
+                    memmove(g_input + g_input_pos + elen, g_input + g_input_pos, g_input_len - g_input_pos);
+                    memcpy(g_input + g_input_pos, EMOJI_LIB[v], elen);
                     g_input_len += elen;
+                    g_input_pos += elen;
                     g_input[g_input_len] = 0;
                     /* handle_command() runs from on_enter() with the term
                      * lock already released (see main()'s input loop) -
@@ -1867,6 +1926,7 @@ static void on_enter(void) {
     memcpy(text, g_input, g_input_len);
     text[g_input_len] = 0;
     g_input_len = 0;
+    g_input_pos = 0;
     g_input[0]  = 0;
 
     /* Outgoing sanitize: strip control chars (defense in depth - our raw-mode
@@ -2143,8 +2203,10 @@ int main(int argc, char **argv) {
                                 }
                                 size_t room = sizeof g_input - 1 - g_input_len;
                                 size_t take = (size_t)paste_len < room ? (size_t)paste_len : room;
-                                memcpy(g_input + g_input_len, paste_buf, take);
+                                memmove(g_input + g_input_pos + take, g_input + g_input_pos, g_input_len - g_input_pos);
+                                memcpy(g_input + g_input_pos, paste_buf, take);
                                 g_input_len += take;
+                                g_input_pos += take;
                                 g_input[g_input_len] = 0;
                                 print_prompt_unlocked();
                             } else {
@@ -2176,6 +2238,23 @@ int main(int argc, char **argv) {
                                 rgcn_longmsg_send_paste(paste_buf, (size_t)out);
                                 rgcn_term_lock();
                             }
+                        }
+                    } else if (strcmp(esc_buf, "D") == 0 && !paste_mode) {
+                        /* Left arrow - move cursor back one UTF-8 char. */
+                        if (g_input_pos > 0) {
+                            size_t p = g_input_pos;
+                            while (p > 0 && ((unsigned char)g_input[p - 1] & 0xC0) == 0x80) p--;
+                            if (p > 0) p--;
+                            g_input_pos = p;
+                            print_prompt_unlocked();
+                        }
+                    } else if (strcmp(esc_buf, "C") == 0 && !paste_mode) {
+                        /* Right arrow - move cursor forward one UTF-8 char. */
+                        if (g_input_pos < g_input_len) {
+                            size_t p = g_input_pos + 1;
+                            while (p < g_input_len && ((unsigned char)g_input[p] & 0xC0) == 0x80) p++;
+                            g_input_pos = p;
+                            print_prompt_unlocked();
                         }
                     }
                     esc_state = 0;
@@ -2217,14 +2296,30 @@ int main(int argc, char **argv) {
             /* Ignore other control chars. */
         } else {
             if (g_input_len + n < sizeof g_input) {
-                memcpy(g_input + g_input_len, buf, n);
+                int was_at_end = (g_input_pos == g_input_len);
+                memmove(g_input + g_input_pos + n, g_input + g_input_pos, g_input_len - g_input_pos);
+                memcpy(g_input + g_input_pos, buf, n);
                 g_input_len += n;
+                g_input_pos += n;
                 g_input[g_input_len] = 0;
-                fwrite(buf, 1, n, stdout);
-                fflush(stdout);
-                /* Update wrap tracking so a later backspace or write_line
-                 * clears the entire prompt block, not just the last row. */
-                recompute_prompt_rows();
+                if (was_at_end) {
+                    /* Fast path: cursor was already at the end, so typing
+                     * just extends the line - printing the new bytes in
+                     * place is correct and avoids a full reprint on every
+                     * keystroke. Cursor stays at the end by construction,
+                     * so g_cursor_row is just "last row", same as before
+                     * arrow-key editing existed. */
+                    fwrite(buf, 1, n, stdout);
+                    fflush(stdout);
+                    recompute_prompt_rows();
+                    g_cursor_row = g_prompt_rows - 1;
+                    if (g_cursor_row < 0) g_cursor_row = 0;
+                } else {
+                    /* Cursor was mid-line (Left-arrow parked it there) -
+                     * inserting shifts everything after it, so only a
+                     * full reprint is correct here, same as backspace. */
+                    print_prompt_unlocked();
+                }
             }
         }
         rgcn_term_unlock();
