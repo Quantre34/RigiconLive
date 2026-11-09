@@ -18,6 +18,7 @@
 #include "poll.h"
 #include "ascii_art.h"
 #include "longmsg.h"
+#include "update_check.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -630,10 +631,16 @@ static void print_banner_body(int notify_on) {
     printf("  %sBildirim :%s %s\n", gray, rst, notify_on ? "Açık" : "Kapalı");
     printf("  %sŞifreleme:%s ChaCha20-Poly1305 (AEAD, RFC 8439)\n", gray, rst);
     printf("  %sİz       :%s Sıfır. Kapanınca her şey gider.\n", gray, rst);
+    char latest[32];
+    if (rgcn_update_available(latest, sizeof latest)) {
+        printf("  %sSürüm    :%s %s  \x1b[33m(update available: %s)\x1b[0m\n",
+               gray, rst, RGCN_VERSION, latest);
+    } else {
+        printf("  %sSürüm    :%s %s\n", gray, rst, RGCN_VERSION);
+    }
     printf("%s%s%s\n", gray, "═══════════════════════════════════════════════════════════", rst);
     printf("  %sKomutlar: /quit /clear /who /status /channel /color /timer /send /accept /reject /game /poll /vote /emoji /ascii /longmsg /help /about%s\n", gray, rst);
-    printf("%s%s%s\n", gray, "───────────────────────────────────────────────────────────", rst);
-    printf("  %s* uygulama Quantre34'e aittir.  detay: /about%s\n\n", gray, rst);
+    printf("%s%s%s\n\n", gray, "───────────────────────────────────────────────────────────", rst);
     fflush(stdout);
 }
 
@@ -741,6 +748,12 @@ void rgcn_main_redraw(void) { redraw_screen(); }
  * uses for incoming CHAT text that already fit in a single packet. */
 void rgcn_main_chat_header(const char *nick, uint64_t ts) { chat_header_line(nick, ts); }
 void rgcn_main_write_raw_line(const char *line) { write_line(line); }
+
+/* Bridge for src/update_check.c's background thread - it has no other
+ * reason to be noticed, so it needs a way to ask for a repaint once its
+ * check completes (same g_needs_redraw the receiver thread's loop
+ * already polls for SIGWINCH). */
+void rgcn_main_request_redraw(void) { g_needs_redraw = 1; }
 
 int rgcn_main_needs_redraw_consume(void) {
     if (g_needs_redraw) {
@@ -1811,6 +1824,7 @@ static void handle_command(const char *cmd) {
         render_system("  /help                   bu liste");
     } else if (strcmp(cmd, "/about") == 0) {
         render_system("Rigicon Live " RGCN_VERSION);
+        render_system("* Bu uygulama Quantre34'e aittir.");
         render_system("  Yazar          : Quantre34");
         render_system("  Kaynak         : https://github.com/Quantre34/RigiconLive");
         render_system("  Lisans         : MIT (LICENSE dosyasına bak)");
@@ -2070,6 +2084,8 @@ int main(int argc, char **argv) {
         return 1;
     }
 #endif
+
+    rgcn_update_check_async();
 
     /* Bracketed-paste state machine. When the terminal wraps a paste with
      * \e[200~ ... \e[201~: a single-line paste merges into g_input like
