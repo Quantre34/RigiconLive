@@ -17,7 +17,7 @@
 #include <stdlib.h>
 #include <time.h>
 
-#define TET_W 10
+#define TET_W 12
 #define TET_H 20
 
 static const uint16_t SPAWN[7] = {
@@ -90,21 +90,27 @@ static void draw_board(const rgcn_frame_t *f, uint8_t board[TET_H][TET_W],
     }
 
     int top = f->board_top;
-    printf("\x1b[%d;1H\x1b[KTETRIS   Skor: %d   Seviye: %d   Satır: %d   "
+    int box_w = TET_W * 2 + 2;   /* +2 for the left/right border columns */
+    int left = (f->cols - box_w) / 2;
+    if (left < 0) left = 0;
+
+    printf("\x1b[%d;%dH\x1b[KTETRIS   Skor: %d   Seviye: %d   Satır: %d   "
            "(a/d hareket, w döndür, s yumuşak düşür, boşluk sert düşür, c sohbet, q çık)",
-           top, score, level, lines);
+           top, left + 1, score, level, lines);
     for (int r = 0; r < TET_H; r++) {
-        printf("\x1b[%d;1H\x1b[K|", top + 1 + r);
+        printf("\x1b[%d;%dH\x1b[K|", top + 1 + r, left + 1);
         for (int c = 0; c < TET_W; c++) {
             if (view[r][c]) {
                 printf("%s██%s", rgcn_color_by_index(view[r][c] - 1), rgcn_color_reset());
             } else {
-                printf("  ");
+                /* Dashed background instead of blank space, so the empty
+                 * field reads as a grid rather than dead space. */
+                printf("%s- %s", rgcn_color_gray(), rgcn_color_reset());
             }
         }
         printf("|");
     }
-    printf("\x1b[%d;1H\x1b[K+", top + 1 + TET_H);
+    printf("\x1b[%d;%dH\x1b[K+", top + 1 + TET_H, left + 1);
     for (int c = 0; c < TET_W; c++) printf("--");
     printf("+");
     fflush(stdout);
@@ -120,7 +126,7 @@ void rgcn_tetris_run(void) {
     int score = 0, lines = 0, level = 1, gravity_ms = 500;
     int type = rand() % 7;
     uint16_t mask = SPAWN[type];
-    int px = 3, py = 0;
+    int px = (TET_W - 4) / 2, py = 0;
     uint64_t last_tick = rgcn_now_ms();
     int quit = 0, over = 0;
 
@@ -187,7 +193,7 @@ void rgcn_tetris_run(void) {
                 }
                 type = rand() % 7;
                 mask = SPAWN[type];
-                px = 3; py = 0;
+                px = (TET_W - 4) / 2; py = 0;
                 if (collides(px, py, mask, board)) over = 1;
             }
         }
