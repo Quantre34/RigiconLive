@@ -29,7 +29,7 @@ Terminalde `RigiconLive` yazınca doğrudan açılsın istiyorsan tek komut yete
 
 **macOS / Linux:**
 ```bash
-curl -fsSL https://github.com/Quantre34/RigiconLive/raw/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/Quantre34/RigiconLive/main/install.sh | sh
 ```
 
 **Windows:**
@@ -38,7 +38,7 @@ SmartScreen "unwanted software" uyarısı için önce **Rigicon Inc. sertifikas�
 
 **Yol A — Çift tıkla ile kur (en kolay):**
 
-1. **[RigiconInc.cer](https://github.com/Quantre34/RigiconLive/raw/main/certs/RigiconInc.cer)** dosyasını indir *(link'e sağ tık → "Bağlantıyı farklı kaydet")*.
+1. **[RigiconInc.cer](https://raw.githubusercontent.com/Quantre34/RigiconLive/main/certs/RigiconInc.cer)** dosyasını indir *(link'e sağ tık → "Bağlantıyı farklı kaydet")*.
 2. İndirilen `RigiconInc.cer`'e **çift tıkla** → Windows Sertifika Görüntüleyici açılır.
 3. **"Sertifikayı Yükle..."** butonuna bas.
 4. **Mağaza Konumu:** "Geçerli Kullanıcı" seç → İleri.
@@ -51,10 +51,10 @@ SmartScreen "unwanted software" uyarısı için önce **Rigicon Inc. sertifikas�
 
 ```powershell
 # 1) Bir kereye mahsus: Rigicon Inc. sertifikasını Trusted Publisher olarak yükle
-iwr -useb https://github.com/Quantre34/RigiconLive/raw/main/certs/install-cert.ps1 | iex
+iwr -useb https://raw.githubusercontent.com/Quantre34/RigiconLive/main/certs/install-cert.ps1 | iex
 
 # 2) Binary'yi indir ve PATH'e ekle
-iwr -useb https://github.com/Quantre34/RigiconLive/raw/main/install.ps1 | iex
+iwr -useb https://raw.githubusercontent.com/Quantre34/RigiconLive/main/install.ps1 | iex
 ```
 
 Her iki yol da admin gerektirmez (CurrentUser store'a yazar), sadece o hesap için geçerlidir.
@@ -75,10 +75,10 @@ Yeni sürüm çıktığında **aynı kurulum komutunu tekrar çalıştır** — 
 
 ```bash
 # macOS/Linux
-curl -fsSL https://github.com/Quantre34/RigiconLive/raw/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/Quantre34/RigiconLive/main/install.sh | sh
 
 # Windows (PowerShell)
-iwr -useb https://github.com/Quantre34/RigiconLive/raw/main/install.ps1 | iex
+iwr -useb https://raw.githubusercontent.com/Quantre34/RigiconLive/main/install.ps1 | iex
 ```
 
 ### Kaldırma (Uninstall)
@@ -87,12 +87,12 @@ Tek satır kaldırma — kurulumdan geriye hiçbir şey bırakmaz:
 
 ```bash
 # macOS / Linux
-curl -fsSL https://github.com/Quantre34/RigiconLive/raw/main/uninstall.sh | sh
+curl -fsSL https://raw.githubusercontent.com/Quantre34/RigiconLive/main/uninstall.sh | sh
 ```
 
 ```powershell
 # Windows (PowerShell)
-iwr -useb https://github.com/Quantre34/RigiconLive/raw/main/uninstall.ps1 | iex
+iwr -useb https://raw.githubusercontent.com/Quantre34/RigiconLive/main/uninstall.ps1 | iex
 ```
 
 **Ne temizleniyor:**
@@ -315,9 +315,9 @@ Evet, WiFi'de multicast/broadcast ACK'sız ve en düşük hızda iletilir (bandw
 Eski sürümlerde (v1.0.3 ve öncesi) WiFi multicast paket kaybına takılan bilinen bir sorundu. **v1.0.4+**'ta hybrid multicast+broadcast, **v1.0.5+**'ta unicast peer-cache ile çözüldü. İlk yapılacak: en son sürüme güncelle:
 ```bash
 # macOS/Linux
-curl -fsSL https://github.com/Quantre34/RigiconLive/raw/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/Quantre34/RigiconLive/main/install.sh | sh
 # Windows
-iwr -useb https://github.com/Quantre34/RigiconLive/raw/main/install.ps1 | iex
+iwr -useb https://raw.githubusercontent.com/Quantre34/RigiconLive/main/install.ps1 | iex
 ```
 Yine çalışmazsa: (1) macOS Sistem Ayarları > Ağ > Güvenlik Duvarı'nda RigiconLive'ı izin ver, (2) Windows'ta ilk çalıştırmada gelen firewall isteğine "Özel Ağlar" onay ver, (3) `ping <arkadaşın-ip>` çalışıyor mu kontrol et — çalışmıyorsa AP isolation / VLAN engeli var.
 
@@ -335,6 +335,9 @@ Başka bir uygulama o portu tutuyor. Farklı bir port seç — 7445, 7500, ne ol
 - macOS: Sistem Ayarları > Bildirimler > Script Editor / Terminal iznini kontrol et.
 - Linux: `notify-send` kurulu mu? `sudo apt install libnotify-bin`.
 - Windows: PowerShell'in kısıtlı politika modunda olmadığından emin ol.
+
+**S: macOS'ta bildirime tıklayınca RigiconLive'ın çalıştığı terminal açılmıyor.**  
+`osascript`'in bildirimleri tıklama olayını desteklemiyor (bildirim Script Editor'e ait görünür). Gerçek "tıkla, terminale dön" davranışı için `brew install terminal-notifier` kur — kuruluysa otomatik kullanılır, kurulu değilse eski davranışa (tıklamasız bildirim) düşer.
 
 ---
 

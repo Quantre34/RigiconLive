@@ -16,6 +16,7 @@
 #include "file.h"
 #include "game.h"
 #include "poll.h"
+#include "ascii_art.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -341,14 +342,29 @@ static void refresh_term_size(void) {
     if (g_term_rows > 200) g_term_rows = 200;
 }
 
-/* Count code points in a UTF-8 byte range (approximate visible columns).
- * Treats each code point as width=1. Wide CJK or emoji will misreport;
- * good enough for our nick/text which is Latin/Turkish. */
+/* Count code points in a UTF-8 byte range as terminal columns. Most code
+ * points are width 1; the emoji + misc-symbol ranges render as width 2 in
+ * modern terminals (emoji presentation), which matters now that /emoji
+ * can put real emoji into g_input - undercounting here is the exact
+ * wrapped-prompt corruption bug fixed in 1.3.4, just for a new input kind.
+ * This is still an approximation, not a full Unicode width table (good
+ * enough for nick/text which is otherwise Latin/Turkish). */
 static int utf8_visible_cols(const char *s, size_t n) {
     int w = 0;
-    for (size_t i = 0; i < n; i++) {
+    size_t i = 0;
+    while (i < n) {
         unsigned char c = (unsigned char)s[i];
-        if ((c & 0xC0) != 0x80) w++;
+        unsigned cp; int len;
+        if (c < 0x80)                  { cp = c;          len = 1; }
+        else if ((c & 0xE0) == 0xC0)   { cp = c & 0x1F;    len = 2; }
+        else if ((c & 0xF0) == 0xE0)   { cp = c & 0x0F;    len = 3; }
+        else if ((c & 0xF8) == 0xF0)   { cp = c & 0x07;    len = 4; }
+        else { i++; w++; continue; }   /* stray continuation byte */
+        if (i + (size_t)len > n) { i++; w++; continue; }
+        for (int k = 1; k < len; k++) cp = (cp << 6) | ((unsigned char)s[i + k] & 0x3F);
+        int wide = (cp >= 0x1F300 && cp <= 0x1FAFF) || (cp >= 0x2600 && cp <= 0x27BF);
+        w += wide ? 2 : 1;
+        i += (size_t)len;
     }
     return w;
 }
@@ -579,7 +595,7 @@ static void print_banner_body(int notify_on) {
     printf("  %sŞifreleme:%s ChaCha20-Poly1305 (AEAD, RFC 8439)\n", gray, rst);
     printf("  %sİz       :%s Sıfır. Kapanınca her şey gider.\n", gray, rst);
     printf("%s%s%s\n", gray, "═══════════════════════════════════════════════════════════", rst);
-    printf("  %sKomutlar: /quit /clear /who /status /channel /color /timer /send /accept /reject /game /poll /vote /help /about%s\n", gray, rst);
+    printf("  %sKomutlar: /quit /clear /who /status /channel /color /timer /send /accept /reject /game /poll /vote /emoji /ascii /help /about%s\n", gray, rst);
     printf("%s%s%s\n", gray, "───────────────────────────────────────────────────────────", rst);
     printf("  %s* uygulama Quantre34'e aittir.  detay: /about%s\n\n", gray, rst);
     fflush(stdout);
@@ -948,6 +964,12 @@ static void handle_decoded(const char *raw, size_t raw_len,
         char *offer_id_s = p;
         if (!offer_id_s) return;
         rgcn_game_on_resign(strtoull(offer_id_s, NULL, 16));
+    } else if (strcmp(kind, "ASCII_SEND") == 0) {
+        /* ASCII_SEND|station|id|ts|nick|art_id - art_id indexes each
+         * peer's own local ASCII_LIB, never carried as raw text. */
+        char *id_s = p;
+        if (!id_s) return;
+        rgcn_ascii_on_send(nick, atoi(id_s));
     } else if (strcmp(kind, "POLL_OPEN") == 0) {
         /* POLL_OPEN|station|id|ts|creator_nick|poll_id_hex|duration_s|n|question|opt1|...|optN */
         char *poll_id_s = split(&p);
@@ -1201,6 +1223,18 @@ static const char *parse_token(const char *in, char *out, size_t out_cap) {
     return in;
 }
 
+/* "/emoji <n>" inserts one of these into g_input (not sent immediately -
+ * mirrors normal typing, so it composes with other text before Enter). */
+static const char *EMOJI_LIB[] = {
+    "\U0001F600", "\U0001F602", "\U0001F60D", "\U0001F60E",
+    "\U0001F44D", "\U0001F44E", "\U0001F64F", "\U0001F389",
+    "\U00002764", "\U0001F525", "\U0001F622", "\U0001F621",
+    "\U0001F914", "\U0001F440", "\U0001F64C", "\U0001F4AF",
+    "\U0001F3AE", "\U000026A1", "\U00002705", "\U0000274C",
+    "\U0001F91D", "\U0001F973", "\U0001F634", "\U0001F44B",
+};
+#define EMOJI_LIB_N (int)(sizeof EMOJI_LIB / sizeof EMOJI_LIB[0])
+
 static void handle_command(const char *cmd) {
     if (strcmp(cmd, "/quit") == 0) {
         g_running = 0;
@@ -1252,6 +1286,45 @@ static void handle_command(const char *cmd) {
                 render_system(buf);
             }
         }
+    } else if (strncmp(cmd, "/emoji", 6) == 0 && (cmd[6] == 0 || cmd[6] == ' ')) {
+        const char *arg = cmd + 6;
+        while (*arg == ' ') arg++;
+        if (!*arg) {
+            render_system("Emoji paleti:");
+            char line[256]; int off = 0;
+            for (int i = 0; i < EMOJI_LIB_N; i++) {
+                if (off == 0) off = snprintf(line, sizeof line, "  ");
+                off += snprintf(line + off, sizeof line - off, "%2d:%s ", i, EMOJI_LIB[i]);
+                if ((i + 1) % 6 == 0 || i + 1 == EMOJI_LIB_N) { render_system(line); off = 0; }
+            }
+            render_system("Ekle: /emoji 5  (mesajına eklenir, Enter'a basınca gönderilir)");
+        } else {
+            char *end = NULL;
+            long v = strtol(arg, &end, 10);
+            if (end == arg || v < 0 || v >= EMOJI_LIB_N) {
+                char buf[64];
+                snprintf(buf, sizeof buf, "Kullanım: /emoji 0-%d", EMOJI_LIB_N - 1);
+                render_system(buf);
+            } else {
+                size_t elen = strlen(EMOJI_LIB[v]);
+                if (g_input_len + elen < sizeof g_input) {
+                    memcpy(g_input + g_input_len, EMOJI_LIB[v], elen);
+                    g_input_len += elen;
+                    g_input[g_input_len] = 0;
+                    /* handle_command() runs from on_enter() with the term
+                     * lock already released (see main()'s input loop) -
+                     * unlike backspace/paste's in-loop callers, we must
+                     * take it ourselves before touching the terminal. */
+                    rgcn_term_lock();
+                    print_prompt_unlocked();
+                    rgcn_term_unlock();
+                } else {
+                    render_system("Mesaj dolu, emoji eklenemedi.");
+                }
+            }
+        }
+    } else if (strncmp(cmd, "/ascii", 6) == 0 && (cmd[6] == 0 || cmd[6] == ' ')) {
+        rgcn_ascii_cmd(cmd + 6);
     } else if (strncmp(cmd, "/channel", 8) == 0 && (cmd[8] == 0 || cmd[8] == ' ')) {
         const char *arg = cmd + 8;
         while (*arg == ' ') arg++;
@@ -1653,6 +1726,11 @@ static void handle_command(const char *cmd) {
         render_system("  /vote <numara>          aktif ankette oy ver");
         render_system("  /poll                   aktif anketin durumunu göster");
         render_system("  /poll end               açtığın anketi erken bitir");
+        render_system("  /emoji                  emoji paleti göster");
+        render_system("  /emoji 5                paletten 5 numaralı emojiyi mesajına ekle");
+        render_system("  /ascii                  ASCII çizim kütüphanesini listele");
+        render_system("  /ascii 2                2 numaralı çizimi önizle (sadece sende)");
+        render_system("  /ascii 2 gönder          2 numaralı çizimi kanala gönder");
         render_system("  /about                  yazar / lisans / isim notu");
         render_system("  /help                   bu liste");
     } else if (strcmp(cmd, "/about") == 0) {
@@ -1682,7 +1760,7 @@ static int is_known_command(const char *text) {
     static const char *known[] = {
         "/quit", "/clear", "/clear!", "/who", "/status", "/help", "/timer",
         "/color", "/send", "/accept", "/reject", "/about", "/channel", "/game",
-        "/poll", "/vote", NULL
+        "/poll", "/vote", "/emoji", "/ascii", NULL
     };
     for (int i = 0; known[i]; i++) {
         size_t klen = strlen(known[i]);

@@ -2,7 +2,7 @@
 # Rigicon Live - one-shot installer for macOS and Linux.
 #
 # Kullanim:
-#   curl -fsSL https://github.com/Quantre34/RigiconLive/raw/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/Quantre34/RigiconLive/main/install.sh | sh
 #
 # Ne yapar:
 #   1. GitHub Releases'ten en son binary'yi indirir (macOS universal veya Linux x86_64).

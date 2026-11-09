@@ -5,7 +5,7 @@
 # indirdiğinde SmartScreen "unrecognized publisher" uyarısı vermez.
 #
 # Kullanim (PowerShell):
-#   iwr -useb https://github.com/Quantre34/RigiconLive/raw/main/certs/install-cert.ps1 | iex
+#   iwr -useb https://raw.githubusercontent.com/Quantre34/RigiconLive/main/certs/install-cert.ps1 | iex
 #
 # Ne yapar:
 #   1. RigiconInc.cer dosyasını repodan indirir.
@@ -16,7 +16,7 @@
 
 $ErrorActionPreference = "Stop"
 
-$CertUrl = "https://github.com/Quantre34/RigiconLive/raw/main/certs/RigiconInc.cer"
+$CertUrl = "https://raw.githubusercontent.com/Quantre34/RigiconLive/main/certs/RigiconInc.cer"
 $TmpCert = Join-Path $env:TEMP "RigiconInc.cer"
 
 Write-Host "==> Sertifika indiriliyor..." -ForegroundColor Cyan
@@ -61,7 +61,7 @@ Write-Host ""
 Write-Host "[+] Sertifika kuruldu." -ForegroundColor Green
 Write-Host ""
 Write-Host "Simdi imzali .exe'yi indirebilirsin (uyari cikmayacak):" -ForegroundColor White
-Write-Host "    iwr -useb https://github.com/Quantre34/RigiconLive/raw/main/install.ps1 | iex" -ForegroundColor Cyan
+Write-Host "    iwr -useb https://raw.githubusercontent.com/Quantre34/RigiconLive/main/install.ps1 | iex" -ForegroundColor Cyan
 Write-Host ""
 Write-Host "Kaldirmak icin:" -ForegroundColor Gray
 Write-Host "    Get-ChildItem Cert:\CurrentUser\Root\$($cert.Thumbprint) | Remove-Item" -ForegroundColor Gray

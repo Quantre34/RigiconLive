@@ -1,7 +1,7 @@
 # Rigicon Live - kaldirma scripti (Windows).
 #
 # Kullanim (PowerShell):
-#   iwr -useb https://github.com/Quantre34/RigiconLive/raw/main/uninstall.ps1 | iex
+#   iwr -useb https://raw.githubusercontent.com/Quantre34/RigiconLive/main/uninstall.ps1 | iex
 #
 # Ne yapar:
 #   1. %LOCALAPPDATA%\Programs\RigiconLive\ klasorunu tumuyle siler.

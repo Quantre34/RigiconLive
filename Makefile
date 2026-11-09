@@ -16,7 +16,7 @@ ifeq ($(UNAME_S_TMP),Linux)
 endif
 LDFLAGS  ?=
 SRC      := src/main.c src/crypto.c src/net.c src/term.c src/notify.c src/file.c \
-            src/game.c src/tetris.c src/xox.c src/pong.c src/poll.c
+            src/game.c src/tetris.c src/xox.c src/pong.c src/poll.c src/ascii_art.c
 HDR      := $(wildcard src/*.h)
 
 UNAME_S  := $(shell uname -s)

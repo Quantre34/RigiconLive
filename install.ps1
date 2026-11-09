@@ -1,7 +1,7 @@
 # Rigicon Live - one-shot installer for Windows.
 #
 # Kullanim (PowerShell'de):
-#   iwr -useb https://github.com/Quantre34/RigiconLive/raw/main/install.ps1 | iex
+#   iwr -useb https://raw.githubusercontent.com/Quantre34/RigiconLive/main/install.ps1 | iex
 #
 # Ne yapar:
 #   1. GitHub Releases'ten en son RigiconLive.exe'yi indirir.

@@ -2,7 +2,7 @@
 # Rigicon Live - kaldirma scripti (macOS ve Linux).
 #
 # Kullanim:
-#   curl -fsSL https://github.com/Quantre34/RigiconLive/raw/main/uninstall.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/Quantre34/RigiconLive/main/uninstall.sh | sh
 #
 # Ne yapar:
 #   1. /usr/local/bin/RigiconLive ve ~/.local/bin/RigiconLive dosyalarini siler.

@@ -96,7 +96,40 @@ void rgcn_notify(const char *title, const char *body) {
         /* Detach from parent process group so parent isn't blocked. */
         setsid();
   #ifdef __APPLE__
-        /* osascript avoids adding any extra runtime dependency. */
+        /* osascript's `display notification` has no click-action support
+         * at all - the notification ends up attributed to whatever ran
+         * osascript (Script Editor), so clicking it raises that instead of
+         * the terminal actually running us. terminal-notifier supports
+         * -activate <bundle-id>, which does focus a specific app on click;
+         * if it's not installed, exec fails and falls through to the
+         * original osascript behavior unchanged. */
+        {
+            static const struct { const char *term_program, *bundle_id; } KNOWN_TERMS[] = {
+                { "Apple_Terminal", "com.apple.Terminal" },
+                { "iTerm.app",      "com.googlecode.iterm2" },
+                { "WarpTerminal",   "dev.warp.Warp-Stable" },
+                { "ghostty",        "com.mitchellh.ghostty" },
+                { "WezTerm",        "com.github.wez.wezterm" },
+                { "vscode",         "com.microsoft.VSCode" },
+                { "Hyper",          "co.zeit.hyper" },
+            };
+            const char *term_program = getenv("TERM_PROGRAM");
+            const char *bundle_id = NULL;
+            for (size_t i = 0; term_program && i < sizeof KNOWN_TERMS / sizeof KNOWN_TERMS[0]; i++) {
+                if (strcmp(term_program, KNOWN_TERMS[i].term_program) == 0) {
+                    bundle_id = KNOWN_TERMS[i].bundle_id;
+                    break;
+                }
+            }
+            if (bundle_id) {
+                execlp("terminal-notifier", "terminal-notifier",
+                       "-title", t, "-message", b, "-activate", bundle_id, (char *)NULL);
+            } else {
+                execlp("terminal-notifier", "terminal-notifier",
+                       "-title", t, "-message", b, (char *)NULL);
+            }
+        }
+        /* terminal-notifier missing - exec above failed and fell through. */
         char script[2048];
         /* AppleScript strings use " as delimiter with \ escaping. */
         char et[256], eb[512];
