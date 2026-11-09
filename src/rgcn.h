@@ -6,7 +6,7 @@
 
 #define RGCN_APP_NAME       "Rigicon Live"
 #define RGCN_COMPANY        "by Quantre34"
-#define RGCN_VERSION        "1.6.5"
+#define RGCN_VERSION        "1.6.6"
 
 #define RGCN_DEFAULT_PORT   7444
 #define RGCN_MIN_PORT       1024

@@ -1375,7 +1375,7 @@ static const char *EMOJI_LIB[] = {
 #define EMOJI_LIB_N (int)(sizeof EMOJI_LIB / sizeof EMOJI_LIB[0])
 
 static void handle_command(const char *cmd) {
-    if (strcmp(cmd, "/quit") == 0) {
+    if (strcmp(cmd, "/quit") == 0 || strcmp(cmd, "/q") == 0) {
         g_running = 0;
     } else if (strcmp(cmd, "/clear") == 0) {
         render_system("Ekran silinsin mi? Tum sohbet gecmisi RAM'den de silinir.");
@@ -1849,7 +1849,7 @@ static void handle_command(const char *cmd) {
         render_system("Reddedildi.");
     } else if (strcmp(cmd, "/help") == 0) {
         render_system("Komutlar:");
-        render_system("  /quit                   çık");
+        render_system("  /quit (/q)              çık");
         render_system("  /clear                  ekranı temizle");
         render_system("  /who                    kanaldakileri listele");
         render_system("  /status                 bağlantı durumu / peer IP'leri");
@@ -1907,7 +1907,7 @@ static void handle_command(const char *cmd) {
 static int is_known_command(const char *text) {
     /* Multi-word commands: match on the first token only. */
     static const char *known[] = {
-        "/quit", "/clear", "/clear!", "/who", "/status", "/help", "/timer",
+        "/quit", "/q", "/clear", "/clear!", "/who", "/status", "/help", "/timer",
         "/color", "/send", "/accept", "/reject", "/about", "/channel", "/game",
         "/poll", "/vote", "/emoji", "/ascii", "/longmsg", NULL
     };
