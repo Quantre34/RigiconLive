@@ -17,6 +17,7 @@
 #include "game.h"
 #include "poll.h"
 #include "ascii_art.h"
+#include "longmsg.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -502,6 +503,41 @@ static void render_chat(const char *nick, const char *text, uint64_t ts) {
     write_line(line);
 }
 
+/* Header-only line for multi-line chat (long-message mode / reassembled
+ * CHATL): "[ts] nick:" with no trailing text, followed by each visual
+ * line as its own write_line() call (see render_chat_multiline below).
+ * Splitting into one log entry per visual line - rather than printing a
+ * blob with embedded '\n' through a single write_line() - keeps the log's
+ * one-entry-per-row invariant intact (feedback_rendering_lessons.md). */
+static void chat_header_line(const char *nick, uint64_t ts) {
+    char tbuf[16]; time_hms(tbuf, sizeof tbuf, ts);
+    char line[128];
+    snprintf(line, sizeof line, "%s[%s]%s %s%s%s:",
+             rgcn_color_gray(), tbuf, rgcn_color_reset(),
+             rgcn_color_for(nick), nick, rgcn_color_reset());
+    write_line(line);
+}
+
+/* text/len may contain embedded '\n' (already stripped of every other
+ * control char by the CHAT sanitizer) - each resulting piece is written
+ * raw, with no prefix, so a pasted ASCII drawing's own leading spaces are
+ * never shifted by a variable-width "[ts] nick:" column. */
+static void render_chat_multiline(const char *nick, const char *text, size_t len, uint64_t ts) {
+    chat_header_line(nick, ts);
+    char line[RGCN_MAX_TEXT];
+    size_t start = 0;
+    for (size_t i = 0; i <= len; i++) {
+        if (i == len || text[i] == '\n') {
+            size_t n = i - start;
+            if (n > sizeof line - 1) n = sizeof line - 1;
+            memcpy(line, text + start, n);
+            line[n] = 0;
+            write_line(line);
+            start = i + 1;
+        }
+    }
+}
+
 /* Timed message: rendered with a [Ns] tag and scheduled for actual removal
  * from the log at now + ttl_ms. */
 static void render_burn(const char *nick, const char *text, uint64_t ts,
@@ -595,7 +631,7 @@ static void print_banner_body(int notify_on) {
     printf("  %sŞifreleme:%s ChaCha20-Poly1305 (AEAD, RFC 8439)\n", gray, rst);
     printf("  %sİz       :%s Sıfır. Kapanınca her şey gider.\n", gray, rst);
     printf("%s%s%s\n", gray, "═══════════════════════════════════════════════════════════", rst);
-    printf("  %sKomutlar: /quit /clear /who /status /channel /color /timer /send /accept /reject /game /poll /vote /emoji /ascii /help /about%s\n", gray, rst);
+    printf("  %sKomutlar: /quit /clear /who /status /channel /color /timer /send /accept /reject /game /poll /vote /emoji /ascii /longmsg /help /about%s\n", gray, rst);
     printf("%s%s%s\n", gray, "───────────────────────────────────────────────────────────", rst);
     printf("  %s* uygulama Quantre34'e aittir.  detay: /about%s\n\n", gray, rst);
     fflush(stdout);
@@ -698,6 +734,13 @@ void rgcn_main_chat_send(const char *text) {
 }
 const char *rgcn_main_nick(void) { return g_nick; }
 void rgcn_main_redraw(void) { redraw_screen(); }
+
+/* Bridges for src/longmsg.c - let it render a multi-line block (its own
+ * outgoing echo, or a reassembled/partial CHATL) as one header line plus
+ * one write_line() per visual line, same primitive render_chat_multiline()
+ * uses for incoming CHAT text that already fit in a single packet. */
+void rgcn_main_chat_header(const char *nick, uint64_t ts) { chat_header_line(nick, ts); }
+void rgcn_main_write_raw_line(const char *line) { write_line(line); }
 
 int rgcn_main_needs_redraw_consume(void) {
     if (g_needs_redraw) {
@@ -812,14 +855,22 @@ static void handle_decoded(const char *raw, size_t raw_len,
         char *text = p ? p : (char *)"";
         /* Sanitize text: strip control chars (ANSI escape injection prevention).
          * A peer with the shared key could otherwise craft a packet that
-         * moves our cursor, clears our screen, or hides output. */
+         * moves our cursor, clears our screen, or hides output. '\n' is the
+         * one exception - long-message mode (src/longmsg.c) needs it as a
+         * plain line separator, and it's safe to allow: every other control
+         * byte (ESC included) is still stripped, so a "line" split out of
+         * this text can never itself carry a cursor-moving escape, and
+         * render_chat_multiline() only ever reaches the terminal through
+         * per-line write_line() calls, never a raw blob print. */
         for (char *c = text; *c; c++) {
             unsigned char b = (unsigned char)*c;
+            if (b == '\n') continue;
             if (b < 0x20 && b != '\t') *c = '?';
             if (b == 0x7f) *c = '?';
         }
         int is_new = peer_touch(nick, (uint64_t)st, from_ip_be, from_port_be);
-        render_chat(nick, text, (uint64_t)ts);
+        if (strchr(text, '\n')) render_chat_multiline(nick, text, strlen(text), (uint64_t)ts);
+        else                    render_chat(nick, text, (uint64_t)ts);
         char nbody[RGCN_MAX_TEXT + 64];
         snprintf(nbody, sizeof nbody, "%s: %s", nick, text);
         rgcn_notify(RGCN_APP_NAME, nbody);
@@ -970,6 +1021,23 @@ static void handle_decoded(const char *raw, size_t raw_len,
         char *id_s = p;
         if (!id_s) return;
         rgcn_ascii_on_send(nick, atoi(id_s));
+    } else if (strcmp(kind, "CHATL_PART") == 0) {
+        /* CHATL_PART|station|id|ts|nick|msg_id_hex|idx|total|chunk_text -
+         * one piece of a long-message-mode paste too big for one packet.
+         * See longmsg.c for the reassembly/timeout-partial-render logic. */
+        char *msg_id_s = split(&p);
+        char *idx_s    = split(&p);
+        char *total_s  = split(&p);
+        char *chunk    = p;
+        if (!msg_id_s || !idx_s || !total_s || !chunk) return;
+        for (char *c = chunk; *c; c++) {
+            unsigned char b = (unsigned char)*c;
+            if (b == '\n') continue;
+            if (b < 0x20 && b != '\t') *c = '?';
+            if (b == 0x7f) *c = '?';
+        }
+        rgcn_longmsg_on_part(nick, strtoull(msg_id_s, NULL, 16), (uint64_t)ts,
+                             atoi(idx_s), atoi(total_s), chunk);
     } else if (strcmp(kind, "POLL_OPEN") == 0) {
         /* POLL_OPEN|station|id|ts|creator_nick|poll_id_hex|duration_s|n|question|opt1|...|optN */
         char *poll_id_s = split(&p);
@@ -1045,6 +1113,7 @@ static RGCN_THREAD_RET receiver_thread(void *arg) {
         /* Every wake-up: check burn expirations (fast, cheap). */
         expire_burns();
         rgcn_poll_tick();
+        rgcn_longmsg_tick();
 
         /* Terminal was resized (or some other async trigger): repaint the
          * log so lines aren't stranded at now-invalid cursor coordinates.
@@ -1325,6 +1394,10 @@ static void handle_command(const char *cmd) {
         }
     } else if (strncmp(cmd, "/ascii", 6) == 0 && (cmd[6] == 0 || cmd[6] == ' ')) {
         rgcn_ascii_cmd(cmd + 6);
+    } else if (strncmp(cmd, "/longmsg", 8) == 0 && (cmd[8] == 0 || cmd[8] == ' ')) {
+        const char *arg = cmd + 8;
+        while (*arg == ' ') arg++;
+        rgcn_longmsg_cmd(arg);
     } else if (strncmp(cmd, "/channel", 8) == 0 && (cmd[8] == 0 || cmd[8] == ' ')) {
         const char *arg = cmd + 8;
         while (*arg == ' ') arg++;
@@ -1731,6 +1804,9 @@ static void handle_command(const char *cmd) {
         render_system("  /ascii                  ASCII çizim kütüphanesini listele");
         render_system("  /ascii 2                2 numaralı çizimi önizle (sadece sende)");
         render_system("  /ascii 2 gönder          2 numaralı çizimi kanala gönder");
+        render_system("  /longmsg                 uzun mesaj modunun durumunu göster");
+        render_system("  /longmsg on               çok satırlı yapıştırmaları tek mesaj gönder");
+        render_system("  /longmsg off              çok satırlı yapıştırmaları satır satır gönder (varsayılan)");
         render_system("  /about                  yazar / lisans / isim notu");
         render_system("  /help                   bu liste");
     } else if (strcmp(cmd, "/about") == 0) {
@@ -1760,7 +1836,7 @@ static int is_known_command(const char *text) {
     static const char *known[] = {
         "/quit", "/clear", "/clear!", "/who", "/status", "/help", "/timer",
         "/color", "/send", "/accept", "/reject", "/about", "/channel", "/game",
-        "/poll", "/vote", "/emoji", "/ascii", NULL
+        "/poll", "/vote", "/emoji", "/ascii", "/longmsg", NULL
     };
     for (int i = 0; known[i]; i++) {
         size_t klen = strlen(known[i]);
@@ -1996,12 +2072,20 @@ int main(int argc, char **argv) {
 #endif
 
     /* Bracketed-paste state machine. When the terminal wraps a paste with
-     * \e[200~ ... \e[201~ we collapse it into a single message (newlines
-     * become spaces) so a multi-line paste doesn't turn into N sends. */
+     * \e[200~ ... \e[201~: a single-line paste merges into g_input like
+     * typed text always has. A multi-line paste is never merged into
+     * g_input (a buffer that can span dozens of visual rows would reopen
+     * the wrapped-prompt-corruption class of bug) - it's handed to
+     * src/longmsg.c instead, which fans it out one message per line by
+     * default, or sends it as one atomic message under "/longmsg on". */
     int      esc_state  = 0;       /* 0=normal, 1=saw ESC, 2=in CSI */
     char     esc_buf[16]; int esc_len = 0;
     int      paste_mode = 0;
-    static char paste_buf[RGCN_MAX_TEXT]; int paste_len = 0;
+    /* Sized past RGCN_LONGMSG_MAX_BYTES (not equal to it) so a paste that
+     * actually exceeds the cap is reported by rgcn_longmsg_send_paste()'s
+     * explicit size check instead of being silently truncated right here
+     * first. */
+    static char paste_buf[RGCN_LONGMSG_MAX_BYTES + 256]; int paste_len = 0;
 
     /* Main input loop. */
     while (g_running) {
@@ -2028,18 +2112,54 @@ int main(int argc, char **argv) {
                     } else if (strcmp(esc_buf, "201~") == 0 && paste_mode) {
                         paste_mode = 0;
                         if (paste_len > 0) {
-                            /* Append pasted chunk to current input, newline→space. */
+                            int has_break = 0;
                             for (int i = 0; i < paste_len; i++) {
-                                unsigned char c = (unsigned char)paste_buf[i];
-                                if (c == '\r' || c == '\n' || c == '\t') paste_buf[i] = ' ';
-                                if (c < 0x20 || c == 0x7f) paste_buf[i] = ' ';
+                                if (paste_buf[i] == '\n' || paste_buf[i] == '\r') { has_break = 1; break; }
                             }
-                            size_t room = sizeof g_input - 1 - g_input_len;
-                            size_t take = (size_t)paste_len < room ? (size_t)paste_len : room;
-                            memcpy(g_input + g_input_len, paste_buf, take);
-                            g_input_len += take;
-                            g_input[g_input_len] = 0;
-                            print_prompt_unlocked();
+                            if (!has_break) {
+                                /* Single line - unchanged behavior: merge
+                                 * into g_input so it composes with
+                                 * whatever's already typed. */
+                                for (int i = 0; i < paste_len; i++) {
+                                    unsigned char c = (unsigned char)paste_buf[i];
+                                    if (c == '\t') paste_buf[i] = ' ';
+                                    else if (c < 0x20 || c == 0x7f) paste_buf[i] = ' ';
+                                }
+                                size_t room = sizeof g_input - 1 - g_input_len;
+                                size_t take = (size_t)paste_len < room ? (size_t)paste_len : room;
+                                memcpy(g_input + g_input_len, paste_buf, take);
+                                g_input_len += take;
+                                g_input[g_input_len] = 0;
+                                print_prompt_unlocked();
+                            } else {
+                                /* Multi-line - normalize CRLF/lone-CR to a
+                                 * single '\n', strip other control bytes,
+                                 * but keep every other byte (crucially,
+                                 * internal spaces) exactly as pasted. */
+                                int out = 0;
+                                for (int i = 0; i < paste_len; i++) {
+                                    unsigned char c = (unsigned char)paste_buf[i];
+                                    if (c == '\r') {
+                                        if (i + 1 < paste_len && paste_buf[i + 1] == '\n') continue;
+                                        c = '\n';
+                                    } else if (c == '\t') {
+                                        c = ' ';
+                                    } else if ((c < 0x20 && c != '\n') || c == 0x7f) {
+                                        c = '?';
+                                    }
+                                    paste_buf[out++] = (char)c;
+                                }
+                                /* A trailing '\n' is just how the paste
+                                 * ended (e.g. the source selection
+                                 * included the last line's newline), not
+                                 * an intentional blank final line - drop
+                                 * it so the multi-line renderers don't
+                                 * emit a spurious empty row after it. */
+                                if (out > 0 && paste_buf[out - 1] == '\n') out--;
+                                rgcn_term_unlock();
+                                rgcn_longmsg_send_paste(paste_buf, (size_t)out);
+                                rgcn_term_lock();
+                            }
                         }
                     }
                     esc_state = 0;

@@ -6,14 +6,22 @@
 
 #define RGCN_APP_NAME       "Rigicon Live"
 #define RGCN_COMPANY        "by Quantre34"
-#define RGCN_VERSION        "1.6.2"
+#define RGCN_VERSION        "1.6.3"
 
 #define RGCN_DEFAULT_PORT   7444
 #define RGCN_MIN_PORT       1024
 #define RGCN_MAX_PORT       65535
 
 #define RGCN_MAX_NICK       32
-#define RGCN_MAX_TEXT       512
+/* Ceiling is set by the wire format, not an arbitrary choice: a CHAT/BURN
+ * packet's structural fields ("kind|station|id|ts|nick|") plus the 32-byte
+ * crypto header (magic+nonce+tag) top out around 135 bytes worst case, and
+ * RGCN_MAX_PACKET is 1400 - itself kept below the ~1472-byte safe Ethernet
+ * UDP payload as a margin against IP fragmentation on VPNs/odd-MTU WiFi
+ * (a lost fragment loses the whole message, see net.c). That leaves
+ * ~1260 bytes of real headroom for text; 1200 keeps a buffer under that
+ * without needing multi-packet chunking. */
+#define RGCN_MAX_TEXT       1200
 #define RGCN_MAX_PACKET     1400
 
 #define RGCN_MSG_CHAT       1
